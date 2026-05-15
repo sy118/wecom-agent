@@ -2,13 +2,13 @@ import { Router } from 'express'
 import { ContextRepository } from '../db/context-repository.js'
 import { McpServerRepository } from '../db/mcp-server-repository.js'
 import { SkillRepository } from '../db/skill-repository.js'
-import type { McpConfig, SkillConfig } from '@wecom-platform/types'
+import type { ContextConfig, McpConfig, SkillConfig } from '@wecom-platform/types'
 
 export const contextsRouter: Router = Router({ mergeParams: true })
 
-async function validateMcpConfigs(botId: string, mcpConfigs: McpConfig[]): Promise<string | null> {
+async function validateMcpConfigs(mcpConfigs: McpConfig[]): Promise<string | null> {
   if (!Array.isArray(mcpConfigs)) return null
-  const servers = await McpServerRepository.findByBotId(botId)
+  const servers = await McpServerRepository.findAll()
   const validIds = new Set(servers.map((s) => s.id))
   for (const cfg of mcpConfigs) {
     if (!validIds.has(cfg.mcpServerId)) {
@@ -18,9 +18,9 @@ async function validateMcpConfigs(botId: string, mcpConfigs: McpConfig[]): Promi
   return null
 }
 
-async function validateSkillConfigs(botId: string, skillConfigs: SkillConfig[]): Promise<string | null> {
+async function validateSkillConfigs(skillConfigs: SkillConfig[]): Promise<string | null> {
   if (!Array.isArray(skillConfigs)) return null
-  const skills = await SkillRepository.findByBotId(botId)
+  const skills = await SkillRepository.findAll()
   const validIds = new Set(skills.map((s) => s.id))
   for (const cfg of skillConfigs) {
     if (!validIds.has(cfg.skillId)) {
@@ -30,43 +30,64 @@ async function validateSkillConfigs(botId: string, skillConfigs: SkillConfig[]):
   return null
 }
 
-async function validateContextConfigs(botId: string, mcpConfigs: McpConfig[], skillConfigs: SkillConfig[]): Promise<string | null> {
-  return (await validateMcpConfigs(botId, mcpConfigs)) ?? (await validateSkillConfigs(botId, skillConfigs))
+async function validateContextConfigs(mcpConfigs: McpConfig[], skillConfigs: SkillConfig[]): Promise<string | null> {
+  return (await validateMcpConfigs(mcpConfigs)) ?? (await validateSkillConfigs(skillConfigs))
+}
+
+const SENSITIVE_KEY_PATTERN = /(api[_-]?key|token|secret|password|credential)/i
+
+function maskSecretSkillParams(ctx: ContextConfig): ContextConfig {
+  return {
+    ...ctx,
+    skillConfigs: (ctx.skillConfigs ?? []).map((cfg) => {
+      const params = { ...(cfg.params ?? {}) }
+      for (const key of Object.keys(params)) {
+        if (!SENSITIVE_KEY_PATTERN.test(key)) continue
+        if (params[key] !== undefined && params[key] !== null && params[key] !== '') params[key] = '******'
+      }
+      return { ...cfg, params }
+    }),
+  }
+}
+
+async function maskContextResponse(ctx: ContextConfig): Promise<ContextConfig> {
+  return maskSecretSkillParams(ctx)
 }
 
 contextsRouter.get('/', async (req, res) => {
   const { botId } = req.params as { botId: string }
-  res.json(await ContextRepository.findByBotId(botId))
+  const contexts = await ContextRepository.findByBotId(botId)
+  res.json(contexts.map((ctx) => maskSecretSkillParams(ctx)))
 })
 
 contextsRouter.post('/', async (req, res) => {
   const { botId } = req.params as { botId: string }
   const data = { ...req.body, botId, mcpConfigs: req.body.mcpConfigs ?? [], skillConfigs: req.body.skillConfigs ?? [] }
-  const err = await validateContextConfigs(botId, data.mcpConfigs, data.skillConfigs)
+  const err = await validateContextConfigs(data.mcpConfigs, data.skillConfigs)
   if (err) { res.status(400).json({ error: err }); return }
-  res.status(201).json(await ContextRepository.create(data))
+  res.status(201).json(await maskContextResponse(await ContextRepository.create(data)))
 })
 
 contextsRouter.get('/:id', async (req, res) => {
   const { botId, id } = req.params as { botId: string; id: string }
   const ctx = await ContextRepository.findById(id)
   if (!ctx || ctx.botId !== botId) { res.status(404).json({ error: 'Context not found' }); return }
-  res.json(ctx)
+  res.json(await maskContextResponse(ctx))
 })
 
 contextsRouter.put('/:id', async (req, res) => {
   const params = req.params as unknown as { botId: string; id: string }
   if (req.body.mcpConfigs !== undefined) {
-    const err = await validateMcpConfigs(params.botId, req.body.mcpConfigs)
+    const err = await validateMcpConfigs(req.body.mcpConfigs)
     if (err) { res.status(400).json({ error: err }); return }
   }
   if (req.body.skillConfigs !== undefined) {
-    const err = await validateSkillConfigs(params.botId, req.body.skillConfigs)
+    const err = await validateSkillConfigs(req.body.skillConfigs)
     if (err) { res.status(400).json({ error: err }); return }
   }
   const ctx = await ContextRepository.update(params.id, req.body)
   if (!ctx) { res.status(404).json({ error: 'Context not found' }); return }
-  res.json(ctx)
+  res.json(await maskContextResponse(ctx))
 })
 
 contextsRouter.delete('/:id', async (req, res) => {

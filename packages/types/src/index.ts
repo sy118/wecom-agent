@@ -58,36 +58,24 @@ export interface ContextConfig {
 
 // Skill configuration ---------------------------------------------------------
 
-export type SkillType = 'prompt' | 'script'
 export type SkillRuntime = 'node' | 'python'
 export type SkillAuditStatus = 'success' | 'error' | 'timeout' | 'blocked'
-
-export interface SkillParamSchemaItem {
-  key: string
-  label: string
-  type: 'string' | 'string[]' | 'number' | 'boolean' | 'secret'
-  description?: string
-}
 
 export interface SkillConfig {
   skillId: string
   enabled: boolean
   params: Record<string, any>
+  forceUse?: boolean
+  /** @deprecated Use forceUse for bundle Skills. Kept for older saved configs. */
   forceCall?: boolean
 }
 
-export interface ScriptSkillManifest {
-  runtime: SkillRuntime
-  entry: string
-  cwd?: string
-  toolName?: string
-  description?: string
-  inputSchema?: Record<string, any>
-}
-
-export interface SkillManifest {
-  prompt?: string
-  script?: ScriptSkillManifest
+export interface SkillBundleMetadata {
+  name: string
+  description: string
+  displayName?: string
+  shortDescription?: string
+  defaultPrompt?: string
   [key: string]: any
 }
 
@@ -102,15 +90,26 @@ export interface SkillPermissionPolicy {
   networkAccess?: boolean
 }
 
+export interface SkillResourceIndex {
+  skillMdPath: string
+  scripts: string[]
+  references: string[]
+  assets: string[]
+  otherFiles: string[]
+  totalFiles: number
+  totalBytes: number
+}
+
 export interface SkillDefinition {
   id: string
-  botId: string
+  botId: string | null
   name: string
   description: string
-  type: SkillType
   enabled: boolean
-  manifest: SkillManifest
-  paramSchema?: SkillParamSchemaItem[]
+  bundlePath: string
+  bundleHash: string
+  metadata: SkillBundleMetadata
+  resourceIndex: SkillResourceIndex
   permissionPolicy: SkillPermissionPolicy
   createdAt: number
   updatedAt: number
@@ -148,7 +147,7 @@ export type ChatType = 'group' | 'user'
 
 export interface McpServerConfig {
   id: string
-  botId: string
+  botId: string | null
   name: string
   url: string
   transportType: 'sse' | 'stdio'

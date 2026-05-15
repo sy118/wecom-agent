@@ -109,8 +109,6 @@ export default function BotsPage() {
           </Button>
           <Button size="small" onClick={() => navigate(`/bots/${bot.id}/contexts`)}>上下文</Button>
           <Button size="small" onClick={() => navigate(`/bots/${bot.id}/bindings`)}>绑定</Button>
-          <Button size="small" onClick={() => navigate(`/bots/${bot.id}/mcp-servers`)}>MCP服务器</Button>
-          <Button size="small" onClick={() => navigate(`/bots/${bot.id}/scheduled-tasks`)}>定时任务</Button>
           <Button size="small" onClick={() => { setEditBot(bot); form.setFieldsValue(bot); setModalOpen(true) }}>编辑</Button>
           <Popconfirm title="确认删除？" onConfirm={() => handleDelete(bot.id)}>
             <Button size="small" danger>删除</Button>

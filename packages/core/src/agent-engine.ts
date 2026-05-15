@@ -8,6 +8,13 @@ import type { LlmConfig, SessionMessage, IncomingContent } from '@wecom-platform
 
 type AgentResponse = { messages?: BaseMessage[] }
 
+export class RecursionLimitError extends Error {
+  constructor(public readonly summary: string) {
+    super('GRAPH_RECURSION_LIMIT')
+    this.name = 'RecursionLimitError'
+  }
+}
+
 export interface AgentEngineConfig {
   llm: LlmConfig
   systemPrompt: string
@@ -46,14 +53,20 @@ function extractTextContent(content: unknown): string {
 }
 
 function extractLastNonEmptyAiText(messages: BaseMessage[] | undefined): string {
-  for (const message of [...(messages ?? [])].reverse()) {
-    // Use isInstance instead of instanceof: streaming LLMs return AIMessageChunk
-    // which is NOT instanceof AIMessage but passes the duck-type isInstance check.
-    if (!AIMessage.isInstance(message)) continue
-    const text = extractTextContent(message.content).trim()
-    if (text) return text
-  }
-  return ''
+  const msgs = messages ?? []
+  // Find the last contiguous run of AI messages (handles streaming chunks)
+  let end = msgs.length - 1
+  while (end >= 0 && !AIMessage.isInstance(msgs[end])) end--
+  if (end < 0) return ''
+
+  let start = end
+  while (start > 0 && AIMessage.isInstance(msgs[start - 1])) start--
+
+  return msgs
+    .slice(start, end + 1)
+    .map((m) => extractTextContent(m.content))
+    .join('')
+    .trim()
 }
 
 function messageType(message: BaseMessage): string {
@@ -79,16 +92,6 @@ function safeResponse(text: string): string {
   if (trimmed) return trimmed
   console.warn('[AgentEngine] Result extraction empty; using fallback response')
   return EMPTY_RESPONSE_FALLBACK
-}
-
-function extractResponseMessages(response: unknown): BaseMessage[] {
-  return Array.isArray((response as AgentResponse | undefined)?.messages) ? (response as AgentResponse).messages! : []
-}
-
-function appendResponseMessages(collectedMessages: BaseMessage[], response: unknown): AgentResponse {
-  const messages = extractResponseMessages(response)
-  collectedMessages.push(...messages)
-  return { ...(response as AgentResponse), messages }
 }
 
 function withCollectedFallback(history: BaseMessage[], collectedMessages: BaseMessage[]): AgentResponse {
@@ -196,20 +199,34 @@ export class AgentEngine {
     const collectedMessages: BaseMessage[] = []
     const logHandler = createToolLogHandler()
 
-    const response = await withTimeout(
-      agent.invoke({ messages: history }, { callbacks: [logHandler], ...this.runtimeOptions() })
-        .then((result) => appendResponseMessages(collectedMessages, result)),
-      timeoutMs
-    ).catch(async (err) => {
+    try {
+      await withTimeout(
+        (async () => {
+          const stream = await agent.stream(
+            { messages: history },
+            { streamMode: 'messages', callbacks: [logHandler], ...this.runtimeOptions() }
+          )
+          for await (const [msg] of stream) {
+            if (msg) collectedMessages.push(msg as BaseMessage)
+          }
+        })(),
+        timeoutMs
+      )
+    } catch (err) {
       if (!isGraphRecursionError(err)) throw err
       console.warn('[AgentEngine] Graph recursion limit reached; summarizing partial messages')
-      return withCollectedFallback(history, collectedMessages)
-    })
+      const messages = collectedMessages.length > 0 ? collectedMessages : history
+      logMessageStructure('invokeWithTools', messages)
+      const summary = await this.summarizePartialResult(messages, systemPrompt)
+      console.log(`[AgentEngine] invokeWithTools result (first 200): ${summary.slice(0, 200)}`)
+      throw new RecursionLimitError(summary)
+    }
 
-    logMessageStructure('invokeWithTools', response.messages)
-    const result = extractLastNonEmptyAiText(response.messages)
+    const messages = collectedMessages.length > 0 ? collectedMessages : history
+    logMessageStructure('invokeWithTools', messages)
+    const result = extractLastNonEmptyAiText(messages)
     console.log(`[AgentEngine] invokeWithTools result (first 200): ${result.slice(0, 200)}`)
-    return result ? result : await this.summarizePartialResult(response.messages, systemPrompt)
+    return result ? result : await this.summarizePartialResult(messages, systemPrompt)
   }
 
   async invokeWithPrompt(
@@ -253,20 +270,35 @@ export class AgentEngine {
     const history = this.buildHistory(sessionMessages, newContent)
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS
     const collectedMessages: BaseMessage[] = []
-    const response = await withTimeout(
-      agent.invoke({ messages: history }, { callbacks: [handler], ...this.runtimeOptions() })
-        .then((result) => appendResponseMessages(collectedMessages, result)),
-      timeoutMs
-    ).catch(async (err) => {
+
+    try {
+      await withTimeout(
+        (async () => {
+          const stream = await agent.stream(
+            { messages: history },
+            { streamMode: 'messages', callbacks: [handler], ...this.runtimeOptions() }
+          )
+          for await (const [msg] of stream) {
+            if (msg) collectedMessages.push(msg as BaseMessage)
+          }
+        })(),
+        timeoutMs
+      )
+    } catch (err) {
       if (!isGraphRecursionError(err)) throw err
       console.warn('[AgentEngine] Graph recursion limit reached during stream; summarizing partial messages')
-      return withCollectedFallback(history, collectedMessages)
-    })
+      const messages = collectedMessages.length > 0 ? collectedMessages : history
+      logMessageStructure('invokeWithStream', messages)
+      const result = extractLastNonEmptyAiText(messages)
+      const summary = result ? result : await this.summarizePartialResult(messages, systemPrompt)
+      throw new RecursionLimitError(accumulated.trim() || summary)
+    }
 
     if (accumulated.trim()) return accumulated.trim()
-    logMessageStructure('invokeWithStream', response.messages)
-    const result = extractLastNonEmptyAiText(response.messages)
-    return result ? result : await this.summarizePartialResult(response.messages, systemPrompt)
+    const messages = collectedMessages.length > 0 ? collectedMessages : history
+    logMessageStructure('invokeWithStream', messages)
+    const result = extractLastNonEmptyAiText(messages)
+    return result ? result : await this.summarizePartialResult(messages, systemPrompt)
   }
 
   private buildHistory(sessionMessages: SessionMessage[], newContent: string | IncomingContent[]): BaseMessage[] {

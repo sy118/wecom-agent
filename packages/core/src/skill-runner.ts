@@ -1,5 +1,6 @@
 import { spawn } from 'child_process'
-import { dirname, isAbsolute, relative, resolve } from 'path'
+import { readFileSync } from 'fs'
+import { extname, isAbsolute, join, relative, resolve } from 'path'
 import { DynamicStructuredTool } from '@langchain/core/tools'
 import type { StructuredTool } from '@langchain/core/tools'
 import type {
@@ -8,12 +9,13 @@ import type {
   SkillConfig,
   SkillDefinition,
   SkillPermissionPolicy,
-  ScriptSkillManifest,
+  SkillRuntime,
 } from '@wecom-platform/types'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_MAX_OUTPUT_BYTES = 64 * 1024
 const DEFAULT_MAX_CONCURRENT_RUNS = 1
+const SENSITIVE_KEY_PATTERN = /(api[_-]?key|token|secret|password|credential)/i
 const runningBySkill = new Map<string, number>()
 
 export interface SkillRuntimeContext {
@@ -24,10 +26,17 @@ export interface SkillRuntimeContext {
   audit?: (record: Omit<SkillAuditRecord, 'id' | 'createdAt'>) => void | Promise<void>
 }
 
-export interface ScriptSkillExecutionInput {
+export interface SkillScriptToolInput {
+  skillName: string
+  scriptPath: string
+  args?: string[]
+  stdin?: string
+}
+
+export interface SkillScriptExecutionInput {
   skill: SkillDefinition
   config: SkillConfig
-  input: unknown
+  input: SkillScriptToolInput
   context: SkillRuntimeContext
 }
 
@@ -43,16 +52,41 @@ function preview(value: unknown, max = 1000): string | null {
   return text.length > max ? `${text.slice(0, max)}...` : text
 }
 
-function sanitizeToolName(value: string): string {
-  const cleaned = value.toLowerCase().replace(/[^a-z0-9_]+/g, '_').replace(/^_+|_+$/g, '')
-  return cleaned || 'skill'
+function collectSecretValues(value: unknown): string[] {
+  if (!value || typeof value !== 'object') return []
+  const values: string[] = []
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY_PATTERN.test(key) && typeof child === 'string' && child) {
+      values.push(child)
+      continue
+    }
+    values.push(...collectSecretValues(child))
+  }
+  return values
 }
 
-export function buildSkillToolName(skill: SkillDefinition): string {
-  const manifest = getScriptManifest(skill)
-  const base = sanitizeToolName(manifest?.toolName ?? skill.name)
-  const suffix = sanitizeToolName(skill.id).slice(0, 8)
-  return `skill_${base}_${suffix}`
+function redactString(value: string, secretValues: string[]): string {
+  let redacted = value
+  for (const secret of secretValues) {
+    if (!secret) continue
+    redacted = redacted.split(secret).join('******')
+  }
+  return redacted
+}
+
+function redactForAudit(value: unknown, secretValues: string[]): unknown {
+  if (typeof value === 'string') return redactString(value, secretValues)
+  if (Array.isArray(value)) return value.map((item) => redactForAudit(item, secretValues))
+  if (!value || typeof value !== 'object') return value
+  const redacted: Record<string, unknown> = {}
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (SENSITIVE_KEY_PATTERN.test(key)) {
+      redacted[key] = child === undefined || child === null || child === '' ? child : '******'
+    } else {
+      redacted[key] = redactForAudit(child, secretValues)
+    }
+  }
+  return redacted
 }
 
 function getPolicy(skill: SkillDefinition): Required<Pick<SkillPermissionPolicy, 'timeoutMs' | 'maxOutputBytes' | 'maxConcurrentRuns'>> & SkillPermissionPolicy {
@@ -64,17 +98,8 @@ function getPolicy(skill: SkillDefinition): Required<Pick<SkillPermissionPolicy,
   }
 }
 
-function getScriptManifest(skill: SkillDefinition): ScriptSkillManifest | null {
-  return skill.type === 'script' && skill.manifest.script ? skill.manifest.script : null
-}
-
-function isShellLike(value: string): boolean {
+function isShellLikePath(value: string): boolean {
   return /[;&|`<>]/.test(value)
-}
-
-function resolveEntry(manifest: ScriptSkillManifest): string {
-  const base = manifest.cwd ? resolve(manifest.cwd) : process.cwd()
-  return isAbsolute(manifest.entry) ? resolve(manifest.entry) : resolve(base, manifest.entry)
 }
 
 function isInside(child: string, parent: string): boolean {
@@ -82,38 +107,22 @@ function isInside(child: string, parent: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
-function validateScriptSkill(skill: SkillDefinition): { manifest?: ScriptSkillManifest; error?: string } {
-  const manifest = getScriptManifest(skill)
-  if (!manifest) return { error: 'Script skill manifest is missing script configuration' }
-  if (manifest.runtime !== 'node' && manifest.runtime !== 'python') return { error: `Unsupported script runtime: ${manifest.runtime}` }
-  if (!manifest.entry || isShellLike(manifest.entry)) return { error: 'Script entry must be a plain file path, not a shell command' }
-  return { manifest }
+function normalizeRelativeScriptPath(value: string): string {
+  const normalized = value.replace(/\\/g, '/').replace(/^\/+/, '')
+  if (!normalized || normalized.includes('\0') || normalized.startsWith('../') || normalized.includes('/../') || normalized === '..') {
+    throw new Error('scriptPath must be a relative path inside the Skill bundle')
+  }
+  if (/^[a-zA-Z]:/.test(normalized) || isAbsolute(normalized) || isShellLikePath(normalized)) {
+    throw new Error('scriptPath must be a plain relative file path')
+  }
+  return normalized.split('/').filter(Boolean).join('/')
 }
 
-async function writeAudit(
-  context: SkillRuntimeContext,
-  skill: SkillDefinition,
-  status: SkillAuditRecord['status'],
-  durationMs: number,
-  input: unknown,
-  output: string | null,
-  error: string | null
-): Promise<void> {
-  try {
-    await context.audit?.({
-      skillId: skill.id,
-      botId: context.botId,
-      contextId: context.contextId,
-      chatKey: context.chatKey,
-      status,
-      durationMs,
-      inputPreview: preview(input),
-      outputPreview: preview(output),
-      error: preview(error),
-    })
-  } catch (err) {
-    console.error('[SkillRunner] Failed to write audit log:', err)
-  }
+function scriptRuntimeForPath(scriptPath: string): SkillRuntime | null {
+  const ext = extname(scriptPath).toLowerCase()
+  if (ext === '.js' || ext === '.mjs' || ext === '.cjs') return 'node'
+  if (ext === '.py') return 'python'
+  return null
 }
 
 function buildEnv(policy: SkillPermissionPolicy): NodeJS.ProcessEnv {
@@ -127,48 +136,150 @@ function buildEnv(policy: SkillPermissionPolicy): NodeJS.ProcessEnv {
   return env
 }
 
+async function writeAudit(
+  context: SkillRuntimeContext,
+  skill: SkillDefinition,
+  config: SkillConfig,
+  status: SkillAuditRecord['status'],
+  durationMs: number,
+  input: unknown,
+  output: string | null,
+  error: string | null
+): Promise<void> {
+  try {
+    const secretValues = collectSecretValues(config.params ?? {})
+    await context.audit?.({
+      skillId: skill.id,
+      botId: context.botId,
+      contextId: context.contextId,
+      chatKey: context.chatKey,
+      status,
+      durationMs,
+      inputPreview: preview(redactForAudit(input, secretValues)),
+      outputPreview: preview(redactForAudit(output, secretValues)),
+      error: preview(redactForAudit(error, secretValues)),
+    })
+  } catch (err) {
+    console.error('[SkillRunner] Failed to write audit log:', err)
+  }
+}
+
 function makeBlockedResult(message: string): string {
   return `[Skill blocked] ${message}`
 }
 
-export async function executeScriptSkill({ skill, config, input, context }: ScriptSkillExecutionInput): Promise<string> {
+export function getEnabledSkillEntries(skills: SkillDefinition[], configs: SkillConfig[]): Array<{ skill: SkillDefinition; config: SkillConfig }> {
+  const byId = new Map(skills.map((skill) => [skill.id, skill]))
+  const entries: Array<{ skill: SkillDefinition; config: SkillConfig }> = []
+  for (const cfg of configs) {
+    if (!cfg.enabled) continue
+    const skill = byId.get(cfg.skillId)
+    if (!skill?.enabled) continue
+    entries.push({ skill, config: cfg })
+  }
+  return entries
+}
+
+function isSkillTriggered(skill: SkillDefinition, config: SkillConfig, content: string | IncomingContent[] | undefined): boolean {
+  if (config.forceUse || config.forceCall) return true
+  const text = contentToText(content).toLowerCase()
+  if (!text) return false
+  const name = skill.name.toLowerCase()
+  return text.includes(`$${name}`) || text.includes(name)
+}
+
+function readSkillMd(skill: SkillDefinition): string | null {
+  try {
+    return readFileSync(join(skill.bundlePath, 'SKILL.md'), 'utf8')
+  } catch {
+    return null
+  }
+}
+
+export function buildSkillPromptAdditions(
+  skills: SkillDefinition[],
+  configs: SkillConfig[],
+  content?: string | IncomingContent[]
+): string {
+  const entries = getEnabledSkillEntries(skills, configs)
+  if (entries.length === 0) return ''
+
+  const parts: string[] = [
+    '## Available Skills',
+    'The following folder-based Skills are enabled for this context. Use a Skill when the user explicitly names it with `$skill-name`, when the task clearly matches its description, or when it is marked for forced use.',
+    ...entries.map(({ skill }) => `- $${skill.name}: ${skill.description}`),
+  ]
+
+  const loaded: string[] = []
+  for (const { skill, config } of entries) {
+    if (!isSkillTriggered(skill, config, content)) continue
+    const skillMd = readSkillMd(skill)
+    if (!skillMd) continue
+    loaded.push(`## Loaded Skill: $${skill.name}\n${skillMd.trim()}`)
+  }
+  if (loaded.length > 0) {
+    parts.push('## Loaded Skill Instructions', loaded.join('\n\n'))
+  }
+  return parts.join('\n\n')
+}
+
+export function appendSkillPrompts(systemPrompt: string, additions: string): string {
+  if (!additions.trim()) return systemPrompt
+  return `${systemPrompt}\n\n# Skill Instructions\n\n${additions}`
+}
+
+export async function executeSkillScript({ skill, config, input, context }: SkillScriptExecutionInput): Promise<string> {
   const startedAt = Date.now()
   const policy = getPolicy(skill)
 
-  if (!policy.scriptsEnabled) {
-    const message = 'Script execution is disabled by policy'
-    await writeAudit(context, skill, 'blocked', Date.now() - startedAt, input, null, message)
-    return makeBlockedResult(message)
-  }
-
-  const validation = validateScriptSkill(skill)
-  if (!validation.manifest) {
-    const message = validation.error ?? 'Invalid script skill manifest'
-    await writeAudit(context, skill, 'blocked', Date.now() - startedAt, input, null, message)
+  const globalScriptsEnabled = process.env.SKILL_SCRIPTS_ENABLED === 'true'
+  if (!globalScriptsEnabled || !policy.scriptsEnabled) {
+    const message = globalScriptsEnabled ? 'Script execution is disabled by policy' : 'Script execution is disabled globally'
+    await writeAudit(context, skill, config, 'blocked', Date.now() - startedAt, input, null, message)
     return makeBlockedResult(message)
   }
 
   const currentRuns = runningBySkill.get(skill.id) ?? 0
   if (currentRuns >= policy.maxConcurrentRuns) {
     const message = `Concurrency limit reached for skill ${skill.name}`
-    await writeAudit(context, skill, 'blocked', Date.now() - startedAt, input, null, message)
+    await writeAudit(context, skill, config, 'blocked', Date.now() - startedAt, input, null, message)
     return makeBlockedResult(message)
   }
 
-  const entry = resolveEntry(validation.manifest)
-  const allowedReadPaths = policy.allowedReadPaths ?? []
-  if (allowedReadPaths.length > 0 && !allowedReadPaths.some((root) => isInside(entry, root))) {
-    const message = 'Script entry is outside allowed read paths'
-    await writeAudit(context, skill, 'blocked', Date.now() - startedAt, input, null, message)
+  let scriptPath: string
+  try {
+    scriptPath = normalizeRelativeScriptPath(input.scriptPath)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Invalid scriptPath'
+    await writeAudit(context, skill, config, 'blocked', Date.now() - startedAt, input, null, message)
+    return makeBlockedResult(message)
+  }
+
+  if (!skill.resourceIndex.scripts.includes(scriptPath)) {
+    const message = 'scriptPath is not an indexed Skill script'
+    await writeAudit(context, skill, config, 'blocked', Date.now() - startedAt, input, null, message)
+    return makeBlockedResult(message)
+  }
+
+  const runtime = scriptRuntimeForPath(scriptPath)
+  if (!runtime) {
+    const message = 'Unsupported script runtime'
+    await writeAudit(context, skill, config, 'blocked', Date.now() - startedAt, input, null, message)
+    return makeBlockedResult(message)
+  }
+
+  const entry = resolve(skill.bundlePath, ...scriptPath.split('/'))
+  if (!isInside(entry, skill.bundlePath)) {
+    const message = 'Script entry is outside the Skill bundle'
+    await writeAudit(context, skill, config, 'blocked', Date.now() - startedAt, input, null, message)
     return makeBlockedResult(message)
   }
 
   runningBySkill.set(skill.id, currentRuns + 1)
   try {
-    const command = validation.manifest.runtime === 'node' ? process.execPath : (process.env.PYTHON_BIN ?? 'python')
-    const cwd = validation.manifest.cwd ? resolve(validation.manifest.cwd) : dirname(entry)
-    const payload = JSON.stringify({
-      input,
+    const command = runtime === 'node' ? process.execPath : (process.env.PYTHON_BIN ?? 'python')
+    const args = Array.isArray(input.args) ? input.args.map(String) : []
+    const payload = input.stdin ?? JSON.stringify({
       params: config.params ?? {},
       query: contentToText(context.content),
       skill: { id: skill.id, name: skill.name },
@@ -179,7 +290,7 @@ export async function executeScriptSkill({ skill, config, input, context }: Scri
       let stderr = ''
       let outputBytes = 0
       let timedOut = false
-      const child = spawn(command, [entry], { cwd, env: buildEnv(policy), shell: false, windowsHide: true })
+      const child = spawn(command, [entry, ...args], { cwd: skill.bundlePath, env: buildEnv(policy), shell: false, windowsHide: true })
       const timer = setTimeout(() => {
         timedOut = true
         child.kill()
@@ -187,7 +298,8 @@ export async function executeScriptSkill({ skill, config, input, context }: Scri
 
       const append = (target: 'stdout' | 'stderr', chunk: Buffer) => {
         outputBytes += chunk.length
-        const remaining = policy.maxOutputBytes - (target === 'stdout' ? Buffer.byteLength(stdout) : Buffer.byteLength(stderr))
+        const current = target === 'stdout' ? stdout : stderr
+        const remaining = policy.maxOutputBytes - Buffer.byteLength(current)
         if (remaining > 0) {
           const next = chunk.toString('utf8').slice(0, remaining)
           if (target === 'stdout') stdout += next
@@ -197,9 +309,7 @@ export async function executeScriptSkill({ skill, config, input, context }: Scri
 
       child.stdout.on('data', (chunk: Buffer) => append('stdout', chunk))
       child.stderr.on('data', (chunk: Buffer) => append('stderr', chunk))
-      child.on('error', (err) => {
-        stderr += err.message
-      })
+      child.on('error', (err) => { stderr += err.message })
       child.on('close', (code) => {
         clearTimeout(timer)
         if (outputBytes > policy.maxOutputBytes) stdout += '\n[output truncated]'
@@ -211,7 +321,7 @@ export async function executeScriptSkill({ skill, config, input, context }: Scri
 
     const result = output.stdout.trim() || output.stderr.trim() || ''
     const error = output.status === 'success' ? null : (output.stderr.trim() || output.status)
-    await writeAudit(context, skill, output.status, Date.now() - startedAt, input, result, error)
+    await writeAudit(context, skill, config, output.status, Date.now() - startedAt, input, result, error)
     if (output.status === 'success') return result || `[Skill ${skill.name}] completed with no output`
     return `[Skill ${output.status}] ${error ?? 'Script execution failed'}`
   } finally {
@@ -221,50 +331,41 @@ export async function executeScriptSkill({ skill, config, input, context }: Scri
   }
 }
 
-export function buildSkillPromptAdditions(skills: SkillDefinition[], configs: SkillConfig[]): string {
-  const byId = new Map(skills.map((skill) => [skill.id, skill]))
-  const parts: string[] = []
-  for (const cfg of configs) {
-    if (!cfg.enabled) continue
-    const skill = byId.get(cfg.skillId)
-    if (!skill?.enabled || skill.type !== 'prompt') continue
-    const prompt = skill.manifest.prompt?.trim()
-    if (!prompt) continue
-    parts.push(`## Skill: ${skill.name}\n${prompt}`)
-  }
-  return parts.join('\n\n')
-}
-
-export function appendSkillPrompts(systemPrompt: string, additions: string): string {
-  if (!additions.trim()) return systemPrompt
-  return `${systemPrompt}\n\n# Skill Instructions\n\n${additions}`
-}
-
 export function createSkillTools(
   skills: SkillDefinition[],
   configs: SkillConfig[],
   context: SkillRuntimeContext
 ): StructuredTool[] {
-  const byId = new Map(skills.map((skill) => [skill.id, skill]))
-  const tools: StructuredTool[] = []
-  for (const cfg of configs) {
-    if (!cfg.enabled) continue
-    const skill = byId.get(cfg.skillId)
-    const manifest = skill ? getScriptManifest(skill) : null
-    if (!skill?.enabled || !manifest) continue
-    const schema = manifest.inputSchema ?? {
-      type: 'object',
-      properties: { query: { type: 'string', description: 'User query or task input' } },
-      additionalProperties: true,
-    }
-    tools.push(new DynamicStructuredTool({
-      name: buildSkillToolName(skill),
-      description: manifest.description ?? skill.description ?? `${skill.name} skill`,
-      schema,
-      func: async (input: unknown) => executeScriptSkill({ skill, config: cfg, input, context }),
-    }) as StructuredTool)
+  const entries = getEnabledSkillEntries(skills, configs).filter(({ skill }) => skill.resourceIndex.scripts.length > 0)
+  if (entries.length === 0) return []
+
+  const byName = new Map<string, { skill: SkillDefinition; config: SkillConfig }>()
+  for (const entry of entries) {
+    byName.set(entry.skill.name, entry)
+    byName.set(entry.skill.id, entry)
   }
-  return tools
+
+  return [new DynamicStructuredTool({
+    name: 'run_skill_script',
+    description: `Run an indexed script from one of the enabled Skill bundles. Enabled skills: ${entries.map(({ skill }) => `$${skill.name}`).join(', ')}.`,
+    schema: {
+      type: 'object',
+      properties: {
+        skillName: { type: 'string', description: 'Skill name or id, for example "source-command-opsx-explore".' },
+        scriptPath: { type: 'string', description: 'Relative script path inside the Skill bundle, for example "scripts/run.js".' },
+        args: { type: 'array', items: { type: 'string' }, description: 'Optional argv strings passed without a shell.' },
+        stdin: { type: 'string', description: 'Optional stdin payload. Defaults to JSON containing query, params, and skill.' },
+      },
+      required: ['skillName', 'scriptPath'],
+      additionalProperties: false,
+    },
+    func: async (rawInput: unknown) => {
+      const input = rawInput as SkillScriptToolInput
+      const entry = byName.get(input.skillName)
+      if (!entry) return makeBlockedResult(`Skill is not enabled for this context: ${input.skillName}`)
+      return executeSkillScript({ skill: entry.skill, config: entry.config, input, context })
+    },
+  }) as StructuredTool]
 }
 
 export function __testResetSkillConcurrency(): void {

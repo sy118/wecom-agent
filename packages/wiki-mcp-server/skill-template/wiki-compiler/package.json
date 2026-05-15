@@ -1,0 +1,13 @@
+{
+  "name": "wiki-compiler",
+  "version": "1.0.0",
+  "description": "从对话历史提炼知识写入 Wiki 知识库",
+  "main": "index.js",
+  "skill": {
+    "type": "script",
+    "runtime": "node",
+    "entry": "index.js",
+    "timeout": 60000,
+    "maxOutputBytes": 65536
+  }
+}

@@ -1,14 +1,23 @@
 import { ConfigProvider, Layout, Menu, Button, Space } from 'antd'
-import { RobotOutlined, MessageOutlined, LogoutOutlined, CloudOutlined } from '@ant-design/icons'
+import { RobotOutlined, MessageOutlined, LogoutOutlined, CloudOutlined, ApiOutlined, ThunderboltOutlined, ScheduleOutlined, BookOutlined } from '@ant-design/icons'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 
 const { Sider, Header, Content } = Layout
+
+function getSelectedKey(pathname: string): string {
+  if (pathname.startsWith('/sessions')) return 'sessions'
+  if (pathname.startsWith('/mcp-servers')) return 'mcp-servers'
+  if (pathname.startsWith('/skills')) return 'skills'
+  if (pathname.startsWith('/scheduled-tasks')) return 'scheduled-tasks'
+  if (pathname.startsWith('/wiki')) return 'wiki'
+  return 'bots'
+}
 
 export default function AppLayout() {
   const navigate = useNavigate()
   const location = useLocation()
 
-  const selectedKey = location.pathname.startsWith('/sessions') ? 'sessions' : 'bots'
+  const selectedKey = getSelectedKey(location.pathname)
 
   const handleLogout = () => {
     localStorage.removeItem('token')
@@ -52,6 +61,11 @@ export default function AppLayout() {
             </div>
             <Menu selectedKeys={[selectedKey]} items={[
               { key: 'bots', icon: <RobotOutlined />, label: '机器人管理', onClick: () => navigate('/bots') },
+              { key: 'mcp-servers', icon: <ApiOutlined />, label: 'MCP 服务器', onClick: () => navigate('/mcp-servers') },
+              { key: 'skills', icon: <ThunderboltOutlined />, label: 'Skills', onClick: () => navigate('/skills') },
+              { key: 'scheduled-tasks', icon: <ScheduleOutlined />, label: '定时任务', onClick: () => navigate('/scheduled-tasks') },
+              { key: 'wiki', icon: <BookOutlined />, label: 'Wiki 知识库', onClick: () => navigate('/wiki') },
+              { type: 'divider' },
               { key: 'sessions', icon: <MessageOutlined />, label: '会话监控', onClick: () => navigate('/sessions') },
             ]} />
           </Sider>

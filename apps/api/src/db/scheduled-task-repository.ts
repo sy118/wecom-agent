@@ -23,11 +23,15 @@ function rowToTask(row: Record<string, unknown>): ScheduledTask {
 }
 
 export const ScheduledTaskRepository = {
-  async findAll(botId: string): Promise<ScheduledTask[]> {
-    const res = await db.execute({
-      sql: 'SELECT * FROM scheduled_tasks WHERE bot_id = ? ORDER BY created_at DESC',
-      args: [botId],
-    })
+  async findAll(botId?: string | null): Promise<ScheduledTask[]> {
+    if (botId) {
+      const res = await db.execute({
+        sql: 'SELECT * FROM scheduled_tasks WHERE bot_id = ? ORDER BY created_at DESC',
+        args: [botId],
+      })
+      return res.rows.map(rowToTask)
+    }
+    const res = await db.execute('SELECT * FROM scheduled_tasks ORDER BY created_at DESC')
     return res.rows.map(rowToTask)
   },
 
@@ -50,8 +54,8 @@ export const ScheduledTaskRepository = {
                target_chat_name, context_id, enabled, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
-        id, data.botId, data.name, data.cronExpr, data.promptTemplate,
-        data.targetChatKey, data.targetChatId, data.targetChatName ?? null,
+        id, data.botId ?? null, data.name, data.cronExpr, data.promptTemplate,
+        data.targetChatKey || data.targetChatId, data.targetChatId, data.targetChatName ?? null,
         (data.contextId || null), data.enabled ? 1 : 0, now, now,
       ],
     })

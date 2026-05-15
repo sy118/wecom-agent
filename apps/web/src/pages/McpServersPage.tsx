@@ -1,15 +1,12 @@
 import { useEffect, useState } from 'react'
 import { Table, Button, Space, Modal, Form, Input, Select, Switch, message, Popconfirm, Tag, Divider } from 'antd'
-import { PlusOutlined, ArrowLeftOutlined } from '@ant-design/icons'
-import { useParams, useNavigate } from 'react-router-dom'
+import { PlusOutlined } from '@ant-design/icons'
 import { mcpServersApi } from '../api/index.js'
 
 interface ParamSchemaItem { key: string; label: string; type: 'string' | 'string[]' | 'number' | 'boolean'; description?: string }
 interface McpServer { id: string; name: string; url: string; transportType: string; enabled: boolean; paramSchema?: ParamSchemaItem[] }
 
 export default function McpServersPage() {
-  const { botId } = useParams<{ botId: string }>()
-  const navigate = useNavigate()
   const [servers, setServers] = useState<McpServer[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
@@ -18,18 +15,18 @@ export default function McpServersPage() {
 
   const load = async () => {
     setLoading(true)
-    try { setServers(await mcpServersApi.list(botId!)) } finally { setLoading(false) }
+    try { setServers(await mcpServersApi.list()) } finally { setLoading(false) }
   }
 
-  useEffect(() => { load() }, [botId])
+  useEffect(() => { load() }, [])
 
   const handleSave = async (values: any) => {
     try {
       if (editServer) {
-        await mcpServersApi.update(botId!, editServer.id, values)
+        await mcpServersApi.update(editServer.id, values)
         message.success('已更新')
       } else {
-        await mcpServersApi.create(botId!, values)
+        await mcpServersApi.create(values)
         message.success('已创建')
       }
       setModalOpen(false); form.resetFields(); setEditServer(null); load()
@@ -37,7 +34,7 @@ export default function McpServersPage() {
   }
 
   const handleDelete = async (id: string) => {
-    await mcpServersApi.delete(botId!, id)
+    await mcpServersApi.delete(id)
     message.success('已删除'); load()
   }
 
@@ -69,10 +66,7 @@ export default function McpServersPage() {
   return (
     <div>
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Space>
-          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/bots')} />
-          <h2 style={{ margin: 0 }}>MCP 服务器管理</h2>
-        </Space>
+        <h2 style={{ margin: 0 }}>MCP 服务器</h2>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditServer(null); form.resetFields(); setModalOpen(true) }}>
           添加 MCP 服务器
         </Button>

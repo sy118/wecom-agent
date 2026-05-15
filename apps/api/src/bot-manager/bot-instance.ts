@@ -1,6 +1,6 @@
 import type { Client } from '@libsql/client'
 import type { StructuredTool } from '@langchain/core/tools'
-import { AgentEngine, DifyClient, MessageQueue, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpTools, createSkillTools, executeScriptSkill } from '@wecom-platform/core'
+import { AgentEngine, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpTools, createSkillTools } from '@wecom-platform/core'
 import { SessionStore } from '../session-store.js'
 import { SkillAuditRepository } from '../db/skill-audit-repository.js'
 import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, SessionMessage } from '@wecom-platform/types'
@@ -28,6 +28,14 @@ export function getVisionFallbackSessionMessages(_sessionMessages: SessionMessag
 
 export function degradeVisionContent(content: IncomingContent[]): string {
   return content.map((c) => (c.type === 'text' ? c.text : `[图片: ${c.url}]`)).join('\n')
+}
+
+export function shouldSkipRuntimeToolsForDify(
+  provider: BotConfig['provider'],
+  mcpConfigs: McpConfig[] = [],
+  skillConfigs: SkillConfig[] = []
+): boolean {
+  return provider === 'dify' && (mcpConfigs.length > 0 || skillConfigs.length > 0)
 }
 
 async function invokeVisionFallback(
@@ -112,6 +120,7 @@ export class BotInstance {
         },
         systemPrompt: '',
         timeoutMs: 500_000,
+        recursionLimit: process.env.AGENT_RECURSION_LIMIT ? Number(process.env.AGENT_RECURSION_LIMIT) : undefined,
       })
       await this.engine.initialize()
 
@@ -237,7 +246,7 @@ export class BotInstance {
       const { streamingMode } = this.deps.bot
 
       if (this.deps.bot.provider === 'dify') {
-        if ((context.mcpConfigs?.length ?? 0) > 0 || (context.skillConfigs?.length ?? 0) > 0) {
+        if (shouldSkipRuntimeToolsForDify(this.deps.bot.provider, context.mcpConfigs ?? [], context.skillConfigs ?? [])) {
           console.log(`[BotInstance:${this.deps.bot.id}] Dify provider skips MCP/Skill runtime tools`)
         }
         if (streamingMode === 'none') {
@@ -253,9 +262,9 @@ export class BotInstance {
       const skillTools = this.resolveSkillTools(context.skillConfigs ?? [], skillContext)
       const tools = this.mergeTools(mcpTools, skillTools)
       let systemPrompt = injectAllowedProjects(context.systemPrompt, context.mcpConfigs ?? [])
-      systemPrompt = appendSkillPrompts(systemPrompt, buildSkillPromptAdditions([...this.skillToolPool.values()], context.skillConfigs ?? []))
-      const promptWithMcpResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content)
-      const promptWithForcedResults = await this.executeForceCallSkills(promptWithMcpResults, context.skillConfigs ?? [], content, context.id, chatKey)
+      systemPrompt = injectWikiNamespace(systemPrompt, context.mcpConfigs ?? [])
+      systemPrompt = appendSkillPrompts(systemPrompt, buildSkillPromptAdditions([...this.skillToolPool.values()], context.skillConfigs ?? [], content))
+      const promptWithForcedResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content)
 
       if (streamingMode === 'progressive') {
         await this.handleProgressive(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame)
@@ -286,7 +295,7 @@ export class BotInstance {
       contextId,
       chatKey,
       content,
-      audit: (record: Parameters<typeof SkillAuditRepository.create>[0]) => SkillAuditRepository.create(record),
+      audit: async (record: Parameters<typeof SkillAuditRepository.create>[0]) => { await SkillAuditRepository.create(record) },
     }
   }
 
@@ -327,9 +336,53 @@ export class BotInstance {
       : content.map((item) => (item.type === 'text' ? item.text : `[图片: ${item.url}]`)).join('\n')
 
     for (const cfg of mcpConfigs) {
-      if (!cfg.enabled || !cfg.forceCall) continue
+      if (!cfg.enabled) continue
       const serverTools = this.toolPool.get(cfg.mcpServerId)
       if (!serverTools?.length) continue
+
+      const findTool = (name: string) => serverTools.find((tool) => tool.name === name || tool.name.endsWith(`_${name}`))
+      const policy = cfg.params?.retrievalPolicy as string | undefined
+      const forceCallPage = cfg.params?.forceCallPage as string | undefined
+      const nsParam = cfg.params?.namespace
+      const namespace = Array.isArray(nsParam) ? nsParam[0] as string | undefined : nsParam as string | undefined
+      const shouldForce = Boolean(cfg.forceCall || policy === 'autoSearch' || policy === 'fixedPage' || forceCallPage)
+      if (!shouldForce) continue
+
+      if (policy === 'manual') continue
+
+      if (policy === 'fixedPage' || forceCallPage) {
+        const wikiReadTool = findTool('wiki_read')
+        if (wikiReadTool) {
+          try {
+            const output = await wikiReadTool.invoke({
+              path: forceCallPage,
+              namespace,
+              max_chars: Number(cfg.params?.maxChars ?? 6000),
+            })
+            results.push(`[wiki_read: ${forceCallPage}]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
+          } catch (err) {
+            console.error(`[BotInstance:${this.deps.bot.id}] Force-call wiki_read failed:`, err)
+          }
+          continue
+        }
+      }
+
+      if (policy === 'autoSearch' || findTool('wiki_search')) {
+        const wikiSearchTool = findTool('wiki_search')
+        if (wikiSearchTool) {
+          try {
+            const output = await wikiSearchTool.invoke({
+              query,
+              namespace,
+              cross_ns: Boolean(cfg.params?.crossNs),
+            })
+            results.push(`[wiki_search]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
+          } catch (err) {
+            console.error(`[BotInstance:${this.deps.bot.id}] Force-call wiki_search failed:`, err)
+          }
+          continue
+        }
+      }
 
       for (const tool of serverTools) {
         try {
@@ -343,35 +396,6 @@ export class BotInstance {
 
     if (results.length === 0) return systemPrompt
     return `${systemPrompt}\n\n# 强制检索结果\n\n${results.join('\n\n')}`
-  }
-
-  private async executeForceCallSkills(
-    systemPrompt: string,
-    skillConfigs: SkillConfig[],
-    content: string | IncomingContent[],
-    contextId: string,
-    chatKey: string
-  ): Promise<string> {
-    const results: string[] = []
-    const query = typeof content === 'string'
-      ? content
-      : content.map((item) => (item.type === 'text' ? item.text : `[image: ${item.url}]`)).join('\n')
-
-    for (const cfg of skillConfigs) {
-      if (!cfg.enabled || !cfg.forceCall) continue
-      const skill = this.skillToolPool.get(cfg.skillId)
-      if (!skill?.enabled || skill.type !== 'script') continue
-      const output = await executeScriptSkill({
-        skill,
-        config: cfg,
-        input: { query },
-        context: this.createSkillRuntimeContext(contextId, chatKey, content),
-      })
-      results.push(`[${skill.name}]\n${output}`)
-    }
-
-    if (results.length === 0) return systemPrompt
-    return `${systemPrompt}\n\n# Forced Skill Results\n\n${results.join('\n\n')}`
   }
 
   private async handleNone(
@@ -388,6 +412,10 @@ export class BotInstance {
       await this.saveMessages(chatKey, content, response)
       await this.adapter.sendMessage(chatId, response).catch(() => {})
     } catch (err: any) {
+      if (err instanceof RecursionLimitError) {
+        await this.adapter.sendMessage(chatId, err.summary).catch(() => {})
+        return
+      }
       // Vision fallback: if LLM rejects multimodal input (400/422), retry with text-only degradation
       if (Array.isArray(content) && isVisionFallbackError(err)) {
         const status = err?.response?.status ?? err?.status
@@ -442,6 +470,16 @@ export class BotInstance {
       }
       await this.adapter.sendMessage(chatId, response).catch(() => {})
     } catch (err: any) {
+      if (err instanceof RecursionLimitError) {
+        if (streamId) {
+          await this.adapter.editMessage(chatId, streamId, err.summary, true).catch(async () => {
+            await this.adapter.sendMessage(chatId, err.summary).catch(() => {})
+          })
+        } else {
+          await this.adapter.sendMessage(chatId, err.summary).catch(() => {})
+        }
+        return
+      }
       if (Array.isArray(content) && isVisionFallbackError(err)) {
         const status = err?.response?.status ?? err?.status
         console.warn(`[BotInstance:${this.deps.bot.id}] Vision error ${status}, retrying with text degradation`)
@@ -518,6 +556,13 @@ export class BotInstance {
         await this.adapter.sendMessage(chatId, finalResponse).catch(() => {})
       })
     } catch (err: any) {
+      if (err instanceof RecursionLimitError) {
+        const reply = accumulated.trim() || err.summary
+        await this.adapter.editMessage(chatId, streamId, reply, true).catch(async () => {
+          await this.adapter.sendMessage(chatId, reply).catch(() => {})
+        })
+        return
+      }
       if (Array.isArray(content) && isVisionFallbackError(err)) {
         const status = err?.response?.status ?? err?.status
         console.warn(`[BotInstance:${this.deps.bot.id}] Vision error ${status}, retrying with text degradation`)
@@ -642,6 +687,26 @@ export class BotInstance {
     }
     return this.queues.get(chatKey)!
   }
+}
+
+function injectWikiNamespace(systemPrompt: string, mcpConfigs: McpConfig[]): string {
+  const namespaces: string[] = []
+  for (const cfg of mcpConfigs) {
+    if (!cfg.enabled) continue
+    const ns = cfg.params?.namespace
+    if (!ns) continue
+    if (Array.isArray(ns)) namespaces.push(...ns)
+    else if (typeof ns === 'string') namespaces.push(ns)
+  }
+  if (namespaces.length === 0) return systemPrompt
+
+  const nsText = namespaces.length === 1
+    ? `当前绑定的 Wiki namespace: ${namespaces[0]}\n当你需要查询相关知识时，使用 wiki_read、wiki_search 等工具，默认在 namespace "${namespaces[0]}" 中查询。`
+    : `当前绑定的 Wiki namespaces: ${namespaces.join(', ')}\n当你需要查询相关知识时，使用 wiki_read、wiki_search 等工具，可查询这些 namespace。`
+
+  const marker = '## Wiki 知识库'
+  if (systemPrompt.includes(marker)) return systemPrompt
+  return `${systemPrompt}\n\n## Wiki 知识库\n${nsText}`
 }
 
 function injectAllowedProjects(systemPrompt: string, mcpConfigs: McpConfig[]): string {

@@ -1,4 +1,4 @@
-import { Router, Request, Response } from 'express'
+import { Router, Response } from 'express'
 import { BotRepository } from '../db/bot-repository.js'
 import { botManager } from '../bot-manager/bot-manager.js'
 import type { BotStatusEvent } from '@wecom-platform/types'

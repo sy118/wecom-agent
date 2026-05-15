@@ -29,6 +29,11 @@ function rowToConfig(row: Record<string, unknown>): ContextConfig {
 }
 
 export const ContextRepository = {
+  async findAll(): Promise<ContextConfig[]> {
+    const res = await db.execute('SELECT * FROM contexts ORDER BY created_at DESC')
+    return res.rows.map(rowToConfig)
+  },
+
   async findByBotId(botId: string): Promise<ContextConfig[]> {
     const res = await db.execute({ sql: 'SELECT * FROM contexts WHERE bot_id = ? ORDER BY created_at DESC', args: [botId] })
     return res.rows.map(rowToConfig)
@@ -51,14 +56,13 @@ export const ContextRepository = {
       await db.execute({ sql: 'UPDATE contexts SET is_default = 0, updated_at = ? WHERE bot_id = ? AND is_default = 1', args: [now, data.botId] })
     }
     await db.execute({
-      sql: `INSERT INTO contexts (id, bot_id, name, system_prompt, allowed_projects, mcp_configs, skill_configs, session_ttl_min, is_default, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      sql: `INSERT INTO contexts (id, bot_id, name, system_prompt, mcp_configs, skill_configs, session_ttl_min, is_default, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         id,
         data.botId,
         data.name,
         data.systemPrompt,
-        '[]',
         JSON.stringify(data.mcpConfigs ?? []),
         JSON.stringify(data.skillConfigs ?? []),
         data.sessionTtlMin,

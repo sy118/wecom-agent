@@ -9,8 +9,10 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - DB_PATH=/data/wecom-platform.db
       - API_PORT=3000
+      - WIKI_ROOT=/data/wiki
     volumes:
       - api-data:/data
+      - wiki-data:/data/wiki
     ports:
       - "${API_PORT:-3000}:3000"
     logging:
@@ -34,5 +36,24 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  wiki-mcp:
+    build:
+      context: .
+      dockerfile: packages/wiki-mcp-server/Dockerfile
+    restart: always
+    environment:
+      - WIKI_ROOT=/data/wiki
+      - WIKI_MCP_PORT=3001
+    volumes:
+      - wiki-data:/data/wiki
+    ports:
+      - "${WIKI_MCP_PORT:-3001}:3001"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   api-data:
+  wiki-data:

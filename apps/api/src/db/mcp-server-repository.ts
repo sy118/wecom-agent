@@ -20,7 +20,7 @@ function serializeParamSchema(value: ParamSchemaItem[] | undefined): string | nu
 function rowToConfig(row: Record<string, unknown>): McpServerConfig {
   return {
     id: row.id as string,
-    botId: row.bot_id as string,
+    botId: (row.bot_id as string | null) ?? null,
     name: row.name as string,
     url: row.url as string,
     transportType: row.transport_type as 'sse' | 'stdio',
@@ -30,8 +30,8 @@ function rowToConfig(row: Record<string, unknown>): McpServerConfig {
 }
 
 export const McpServerRepository = {
-  async findByBotId(botId: string): Promise<McpServerConfig[]> {
-    const res = await db.execute({ sql: 'SELECT * FROM mcp_servers WHERE bot_id = ?', args: [botId] })
+  async findAll(): Promise<McpServerConfig[]> {
+    const res = await db.execute('SELECT * FROM mcp_servers ORDER BY name')
     return res.rows.map(rowToConfig)
   },
 

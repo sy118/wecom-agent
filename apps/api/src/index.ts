@@ -16,6 +16,7 @@ import { mcpServersRouter } from './routes/mcp-servers.js'
 import { skillsRouter } from './routes/skills.js'
 import { sessionsRouter } from './routes/sessions.js'
 import { createScheduledTasksRouter } from './routes/scheduled-tasks.js'
+import { wikiRouter } from './routes/wiki.js'
 import type { BotConfig } from '@wecom-platform/types'
 
 const PORT = Number(process.env.API_PORT ?? 3000)
@@ -46,10 +47,12 @@ async function main(): Promise<void> {
   app.use('/api/bots', authMiddleware, botsRouter)
   app.use('/api/bots/:botId/contexts', authMiddleware, contextsRouter)
   app.use('/api/bots/:botId/bindings', authMiddleware, bindingsRouter)
-  app.use('/api/bots/:botId/mcp-servers', authMiddleware, mcpServersRouter)
-  app.use('/api/bots/:botId/skills', authMiddleware, skillsRouter)
   app.use('/api/bots/:botId/scheduled-tasks', authMiddleware, createScheduledTasksRouter(taskScheduler))
+  app.use('/api/mcp-servers', authMiddleware, mcpServersRouter)
+  app.use('/api/skills', authMiddleware, skillsRouter)
+  app.use('/api/scheduled-tasks', authMiddleware, createScheduledTasksRouter(taskScheduler))
   app.use('/api/sessions', authMiddleware, sessionsRouter)
+  app.use('/api/wiki', authMiddleware, wikiRouter)
 
   app.listen(PORT, () => {
     console.log(`[API] Server running on port ${PORT}`)
