@@ -142,6 +142,9 @@ API 容器中的数据库默认保存到 Docker volume `api-data`，容器内路
 | `DB_PATH` | SQLite/libSQL 数据库文件路径 | `./data/wecom-platform.db`，Docker 中为 `/data/wecom-platform.db` | 否 |
 | `API_PORT` | API 服务端口 | `3000` | 否 |
 | `WEB_PORT` | Docker 部署时 Web 对外端口 | `8080` | 否 |
+| `WIKI_ROOT` | Wiki 知识库根目录，API 与 wiki-mcp-server 必须指向同一目录 | `./data/wiki`，Docker 中为 `/data/wiki` | 否 |
+| `WIKI_MCP_PORT` | Wiki MCP Server 端口 | `3001` | 否 |
+| `WIKI_MCP_URL` | Wiki MCP 基础地址，API 健康检查使用；MCP SSE 地址在此基础上追加 `/sse` | `http://localhost:3001`，Docker 中为 `http://wiki-mcp:3001` | 否 |
 
 ## 控制台配置流程
 
@@ -178,8 +181,11 @@ API 容器中的数据库默认保存到 Docker volume `api-data`，容器内路
 | `pnpm build` | 按 types、core、api、web 顺序构建全部包。 |
 | `pnpm build:api` | 只构建 API 包。 |
 | `pnpm build:web` | 只构建 Web 控制台。 |
+| `pnpm build:wiki-mcp` | 只构建 Wiki MCP Server。 |
 | `pnpm dev:api` | 以 watch 模式运行已构建的 API dist 文件。 |
 | `pnpm dev:web` | 启动 Vite 开发服务器。 |
+| `pnpm dev:wiki-mcp` | 以 watch 模式运行已构建的 Wiki MCP Server。 |
+| `pnpm wiki-mcp` | 运行已构建的 Wiki MCP Server。 |
 | `pnpm test` | 构建后运行 core 包中的 Node 测试。 |
 
 ## 数据与安全
@@ -226,54 +232,129 @@ API 容器中的数据库默认保存到 Docker volume `api-data`，容器内路
 
 ## Wiki 知识库
 
-平台内置 Wiki 知识库系统，让 Bot 能够访问持续更新的领域文档。
+平台内置 Wiki 知识库系统，让 Bot 能够访问持续更新的领域文档。Wiki 由两部分共同工作：
+
+- API 读取 `WIKI_ROOT`，用于 Web Console 的 Namespace、文档浏览、搜索、上传、草稿审核和健康检查。
+- `wiki-mcp-server` 读取同一个 `WIKI_ROOT`，通过 SSE 向 Bot 暴露 `wiki_read`、`wiki_search`、`wiki_write`、`wiki_append`、`wiki_list` 和 `wiki_git_pull` 工具。
+
+本地开发时建议把 `WIKI_ROOT` 写成绝对路径。`pnpm dev:api` 和 `pnpm dev:wiki-mcp` 分别在不同 workspace 包目录下运行，如果使用相对路径，两个进程可能会读到不同的 Wiki 目录，表现为控制台能看到文档但 Bot 没有命中，或者 Bot 提示没有可用 Wiki 工具。
 
 ### 环境变量
 
 ```env
-WIKI_ROOT=/data/wiki          # Wiki 根目录（必须是 Git 仓库）
-WIKI_MCP_PORT=3001            # Wiki MCP Server 端口，默认 3001
-WIKI_GIT_REMOTE=              # 可选，Git 远端地址（用于 git pull 同步）
+WIKI_ROOT=E:/path/to/wecom-agent/apps/api/data/wiki
+WIKI_MCP_PORT=3001
+WIKI_MCP_URL=http://127.0.0.1:3001
+WIKI_GIT_REMOTE=
 ```
+
+说明：
+
+- `WIKI_ROOT` 是 Wiki 根目录，建议初始化为 Git 仓库；Namespace 文件实际位于 `WIKI_ROOT/namespaces/<namespace-path>`。
+- `WIKI_MCP_PORT` 是 wiki-mcp-server 监听端口。端口冲突时可改为 `3002` 等，但 `.env`、健康检查地址和 MCP Server URL 必须保持一致。
+- `WIKI_MCP_URL` 是 API 使用的 Wiki MCP 基础地址，不要追加 `/sse`。在 Web Console 的 MCP Server URL 中使用 `http://127.0.0.1:<port>/sse`。
+- Docker Compose 会让 API 使用 `http://wiki-mcp:3001` 访问 Wiki MCP，容器内 Wiki 根目录为 `/data/wiki`。
 
 ### 快速上手
 
 **1. 初始化 Wiki 目录**
 
 ```bash
-mkdir -p /data/wiki/namespaces
-cd /data/wiki
+mkdir -p /absolute/wiki/root/namespaces
+cd /absolute/wiki/root
 git init
 git commit --allow-empty -m "init wiki"
 ```
 
+Windows PowerShell 示例：
+
+```powershell
+New-Item -ItemType Directory -Force E:\path\to\wecom-agent\apps\api\data\wiki\namespaces
+git -C E:\path\to\wecom-agent\apps\api\data\wiki init
+git -C E:\path\to\wecom-agent\apps\api\data\wiki commit --allow-empty -m "init wiki"
+```
+
 **2. 启动 Wiki MCP Server**
 
+首次启动前先构建，因为本地 dev 脚本运行的是 `dist`：
+
 ```bash
-WIKI_ROOT=/data/wiki pnpm wiki-mcp
-# 或使用 Docker Compose（已内置 wiki-mcp 服务）
+pnpm build
+pnpm dev:api
+pnpm dev:web
+pnpm dev:wiki-mcp
 ```
+
+如果 `3001` 已有旧的 wiki-mcp 实例占用，可以把 `.env` 改为：
+
+```env
+WIKI_MCP_PORT=3002
+WIKI_MCP_URL=http://127.0.0.1:3002
+```
+
+随后在 MCP Server 配置中使用 `http://127.0.0.1:3002/sse`。
 
 **3. 在 Web Console 创建 Namespace**
 
-访问 Web Console → Wiki 知识库 → 新建 Namespace，填写标识符（如 `product`）和目录路径。
+访问 Web Console → Wiki 知识库 → 新建 Namespace，填写标识符（如 `product`）和目录路径（如 `product`）。目录路径是相对 `WIKI_ROOT/namespaces` 的路径。
 
 **4. 在 Bot 中注册 Wiki MCP Server**
 
 Web Console → MCP 服务器 → 新建，填写：
 - 名称：`wiki-mcp`
-- URL：`http://localhost:3001/sse`
+- URL：本地开发使用 `http://127.0.0.1:3001/sse`；如果端口改为 `3002`，使用 `http://127.0.0.1:3002/sse`；Docker Compose 内部使用 `http://wiki-mcp:3001/sse`
 - 传输类型：SSE
+- 状态：启用
 
 **5. 在 Context 中绑定 Namespace**
 
 Web Console → 机器人 → 上下文 → 编辑，在 MCP 配置中启用 `wiki-mcp`，设置 params：
 
 ```json
-{ "namespace": "product" }
+{
+  "namespace": "product",
+  "retrievalPolicy": "autoSearch",
+  "crossNs": false
+}
 ```
 
-Bot 回答时会自动在系统提示中注入 Wiki namespace 信息，LLM 可主动调用 `wiki_read`、`wiki_search` 等工具查询知识库。
+常用检索策略：
+
+- `manual`：只暴露工具，由模型按需主动调用。
+- `autoSearch`：Bot 收到问题后先用用户问题搜索 Wiki，再把命中摘要注入系统提示。
+- `fixedPage`：固定读取某个页面，适合制度、SOP 或常驻上下文；可同时设置 `forceCallPage` 和 `maxChars`。
+
+修改 MCP 服务 URL、启用状态或 Context 的 MCP 配置后，需要重启对应 Bot。Bot 在启动时加载 MCP 工具，不重启可能仍然使用旧配置。
+
+### 验证 Wiki 是否可用
+
+1. 检查 wiki-mcp 健康状态：
+
+   ```bash
+   curl http://127.0.0.1:3001/health
+   ```
+
+   返回中的 `wikiRoot` 应该等于 `.env` 中的 `WIKI_ROOT`。
+
+2. 检查 API 侧健康状态：
+
+   ```bash
+   curl http://localhost:3000/api/wiki/health
+   ```
+
+   `rootConfigured`、`rootExists` 和 `wikiMcp` 应为 `ok` 或可解释的 warning。
+
+3. 在 Web Console → Wiki 知识库 → 健康状态里执行测试检索。测试词要使用文档中真实存在的关键词；通用词如“测试”可能没有命中，但不代表工具不可用。
+
+4. 在企业微信里向已绑定 Context 的 Bot 提问。若 Bot 回复“没有可用的 Wiki 检索工具”，按下面的排障清单检查。
+
+### Wiki 排障
+
+- Bot 提示没有 Wiki 工具：确认 MCP 服务器已启用，URL 是 `/sse` 结尾，Context 中已启用该 MCP 配置，并重启 Bot。
+- 控制台有文档但 Bot 搜不到：确认 API 与 wiki-mcp-server 的 `WIKI_ROOT` 是同一个绝对路径，并检查 `http://127.0.0.1:<port>/health` 返回的 `wikiRoot`。
+- 本地 `localhost` 连接异常：优先把 MCP Server URL 写成 `http://127.0.0.1:<port>/sse`，避免 IPv4/IPv6 解析差异。
+- 搜索结果为空：换用文档标题、文件名或正文里的真实关键词；`wiki_search` 是关键词检索，不会凭空召回语义相近但没有字面命中的内容。
+- 修改端口后仍连旧服务：检查 `.env` 的 `WIKI_MCP_PORT`、`WIKI_MCP_URL`、Web Console 的 MCP Server URL 是否一致，并停止旧端口上的 wiki-mcp 实例。
 
 ### Obsidian 集成
 
@@ -282,15 +363,21 @@ Bot 回答时会自动在系统提示中注入 Wiki namespace 信息，LLM 可�
 3. 配置自动 commit + push 间隔（建议 5 分钟）
 4. 在 Web Console 点击"同步最新（Git Pull）"或等待 wiki-mcp-server 定时拉取
 
-### 定时编译示例
+### 知识沉淀与审核
 
-在 Web Console → 定时任务 → 新建，配置：
+推荐把新知识先沉淀为待审核草稿，再由管理员合并到正式 Wiki 页面：
+
+1. 在 Web Console → Wiki 知识库 → 知识草稿中创建草稿，填写目标页面和 Markdown 内容。
+2. 审核通过后点击合并，系统会写入 `WIKI_ROOT/namespaces/<namespace>/<targetPath>` 并尝试提交 Git commit。
+3. 对需要自动沉淀的场景，可以用定时任务让 Bot 汇总当天会话，并把结果发到管理员群，由管理员复制为草稿或在确认后使用 `wiki_write`/`wiki_append`。
+
+定时任务示例：
 
 ```json
 {
   "name": "每日 Wiki 编译",
   "cronExpr": "0 2 * * *",
-  "promptTemplate": "请检查今天的对话，提炼有价值的知识，使用 wiki_write 工具更新 Wiki 知识库（namespace: product）。完成后汇报更新了哪些页面。",
+  "promptTemplate": "请检查今天的对话，提炼有价值的知识，按 Markdown 输出待审核 Wiki 草稿，包含建议 namespace、目标页面、内容和来源依据。不要直接覆盖正式文档。",
   "targetChatKey": "wecom:group:your-admin-group-id"
 }
 ```

@@ -10,11 +10,14 @@ services:
       - DB_PATH=/data/wecom-platform.db
       - API_PORT=3000
       - WIKI_ROOT=/data/wiki
+      - WIKI_MCP_URL=http://wiki-mcp:3001
+    depends_on:
+      - wiki-mcp
     volumes:
       - api-data:/data
       - wiki-data:/data/wiki
-    ports:
-      - "${API_PORT:-3000}:3000"
+    expose:
+      - "3000"
     logging:
       driver: json-file
       options:
