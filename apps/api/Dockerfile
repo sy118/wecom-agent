@@ -3,7 +3,7 @@ WORKDIR /app
 
 RUN npm install -g pnpm
 
-COPY package.json pnpm-workspace.yaml ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/types/package.json ./packages/types/
 COPY packages/core/package.json ./packages/core/
 COPY apps/api/package.json ./apps/api/
@@ -21,9 +21,10 @@ RUN pnpm --filter @wecom-platform/api build
 FROM node:20-alpine AS runtime
 WORKDIR /app
 
+RUN apk add --no-cache git
 RUN npm install -g pnpm
 
-COPY package.json pnpm-workspace.yaml ./
+COPY package.json pnpm-workspace.yaml pnpm-lock.yaml ./
 COPY packages/types/package.json ./packages/types/
 COPY packages/core/package.json ./packages/core/
 COPY apps/api/package.json ./apps/api/

@@ -296,7 +296,7 @@ async function migrateSkillsBotIdNullable(): Promise<void> {
 }
 
 async function seedBuiltinMcpServers(): Promise<void> {
-  const wikiMcpUrl = process.env.WIKI_MCP_URL ?? 'http://localhost:3001/sse'
+  const wikiMcpUrl = wikiMcpSseUrl()
   const existing = await db.execute({
     sql: `SELECT id FROM mcp_servers WHERE name = 'wiki-mcp (内置)'`,
     args: [],
@@ -307,4 +307,11 @@ async function seedBuiltinMcpServers(): Promise<void> {
     sql: `INSERT INTO mcp_servers (id, bot_id, name, url, transport_type, enabled) VALUES (?, NULL, ?, ?, 'sse', 0)`,
     args: [randomUUID(), 'wiki-mcp (内置)', wikiMcpUrl],
   })
+}
+
+function wikiMcpSseUrl(): string {
+  const configured = process.env.WIKI_MCP_URL?.trim()
+  const baseUrl = configured || `http://localhost:${process.env.WIKI_MCP_PORT ?? 3001}`
+  const normalized = baseUrl.replace(/\/+$/, '')
+  return normalized.endsWith('/sse') ? normalized : `${normalized}/sse`
 }

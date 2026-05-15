@@ -14,7 +14,7 @@ import { WikiNamespaceRepository, type WikiNamespace } from '../db/wiki-namespac
 export const wikiRouter: Router = Router()
 
 const WIKI_ROOT = process.env.WIKI_ROOT ?? ''
-const WIKI_MCP_HEALTH_URL = process.env.WIKI_MCP_URL ?? `http://localhost:${process.env.WIKI_MCP_PORT ?? 3001}`
+const WIKI_MCP_HEALTH_URL = wikiMcpBaseUrl()
 
 type HealthStatus = 'ok' | 'warning' | 'error' | 'unknown'
 type RetrievalPolicy = 'manual' | 'autoSearch' | 'fixedPage'
@@ -219,6 +219,12 @@ async function bindingSummary(namespace: string) {
 
 function healthItem(status: HealthStatus, message: string) {
   return { status, message }
+}
+
+function wikiMcpBaseUrl(): string {
+  const configured = process.env.WIKI_MCP_URL?.trim()
+  const baseUrl = configured || `http://localhost:${process.env.WIKI_MCP_PORT ?? 3001}`
+  return baseUrl.replace(/\/+$/, '').replace(/\/sse$/i, '')
 }
 
 async function getGlobalHealth() {
