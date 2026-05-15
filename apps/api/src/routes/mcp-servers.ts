@@ -4,13 +4,11 @@ import { McpServerRepository } from '../db/mcp-server-repository.js'
 export const mcpServersRouter: Router = Router({ mergeParams: true })
 
 mcpServersRouter.get('/', async (req, res) => {
-  const { botId } = req.params as { botId: string }
-  res.json(await McpServerRepository.findByBotId(botId))
+  res.json(await McpServerRepository.findAll())
 })
 
 mcpServersRouter.post('/', async (req, res) => {
-  const { botId } = req.params as { botId: string }
-  const data = { ...req.body, botId }
+  const data = { ...req.body, botId: null }
   res.status(201).json(await McpServerRepository.create(data))
 })
 

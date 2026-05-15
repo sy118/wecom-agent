@@ -39,7 +39,7 @@ export async function initDb(): Promise<void> {
       bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
       system_prompt TEXT NOT NULL,
-      allowed_projects TEXT NOT NULL,
+      mcp_configs TEXT NOT NULL DEFAULT '[]',
       skill_configs TEXT NOT NULL DEFAULT '[]',
       session_ttl_min INTEGER NOT NULL DEFAULT 30,
       is_default INTEGER NOT NULL DEFAULT 0,
@@ -60,7 +60,7 @@ export async function initDb(): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS mcp_servers (
       id TEXT PRIMARY KEY,
-      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
       url TEXT NOT NULL,
       transport_type TEXT NOT NULL DEFAULT 'sse',
@@ -70,14 +70,18 @@ export async function initDb(): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS skills (
       id TEXT PRIMARY KEY,
-      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
       description TEXT NOT NULL,
-      type TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'bundle',
       enabled INTEGER NOT NULL DEFAULT 1,
-      manifest_json TEXT NOT NULL,
+      manifest_json TEXT NOT NULL DEFAULT '{}',
       param_schema TEXT,
-      permission_policy TEXT NOT NULL,
+      bundle_path TEXT,
+      bundle_hash TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      resource_index_json TEXT NOT NULL DEFAULT '{}',
+      permission_policy TEXT NOT NULL DEFAULT '{}',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -116,7 +120,7 @@ export async function initDb(): Promise<void> {
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       id TEXT PRIMARY KEY,
-      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
       cron_expr TEXT NOT NULL,
       prompt_template TEXT NOT NULL,
@@ -131,22 +135,53 @@ export async function initDb(): Promise<void> {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS wiki_namespaces (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL UNIQUE,
+      display_name TEXT NOT NULL,
+      path TEXT NOT NULL,
+      description TEXT,
+      git_enabled INTEGER NOT NULL DEFAULT 1,
+      auto_compile INTEGER NOT NULL DEFAULT 0,
+      compile_schedule TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS wiki_knowledge_drafts (
+      id TEXT PRIMARY KEY,
+      namespace TEXT NOT NULL,
+      target_path TEXT NOT NULL,
+      content TEXT NOT NULL,
+      source_type TEXT NOT NULL DEFAULT 'manual',
+      source_ref TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      review_reason TEXT,
+      reviewed_by TEXT,
+      reviewed_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     UPDATE bots SET status = 'stopped' WHERE status = 'running';
   `)
 
-  // Migrate columns that may not exist in older DB versions
-  await addColumnIfMissing('bots', 'provider', "TEXT NOT NULL DEFAULT 'openai-compatible'")
-  await addColumnIfMissing('bots', 'streaming_mode', "TEXT NOT NULL DEFAULT 'none'")
-  await addColumnIfMissing('bots', 'dify_base_url', 'TEXT')
-  await addColumnIfMissing('bots', 'dify_api_key', 'TEXT')
-  await addColumnIfMissing('bots', 'dify_app_id', 'TEXT')
-  await addColumnIfMissing('bots', 'vision_enabled', 'INTEGER NOT NULL DEFAULT 0')
   await addColumnIfMissing('contexts', 'mcp_configs', "TEXT NOT NULL DEFAULT '[]'")
   await addColumnIfMissing('contexts', 'skill_configs', "TEXT NOT NULL DEFAULT '[]'")
   await addColumnIfMissing('mcp_servers', 'param_schema', 'TEXT')
-
-  // Migrate allowed_projects → mcp_configs for existing contexts
+  await addColumnIfMissing('skills', 'type', "TEXT NOT NULL DEFAULT 'bundle'")
+  await addColumnIfMissing('skills', 'manifest_json', "TEXT NOT NULL DEFAULT '{}'")
+  await addColumnIfMissing('skills', 'param_schema', 'TEXT')
+  await addColumnIfMissing('skills', 'bundle_path', 'TEXT')
+  await addColumnIfMissing('skills', 'bundle_hash', 'TEXT')
+  await addColumnIfMissing('skills', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'")
+  await addColumnIfMissing('skills', 'resource_index_json', "TEXT NOT NULL DEFAULT '{}'")
+  await addColumnIfMissing('skills', 'permission_policy', "TEXT NOT NULL DEFAULT '{}'")
   await migrateAllowedProjects()
+  await migrateScheduledTasksBotIdNullable()
+  await migrateMcpServersBotIdNullable()
+  await migrateSkillsBotIdNullable()
+  await seedBuiltinMcpServers()
 }
 
 async function addColumnIfMissing(table: string, column: string, definition: string): Promise<void> {
@@ -158,7 +193,10 @@ async function addColumnIfMissing(table: string, column: string, definition: str
 }
 
 async function migrateAllowedProjects(): Promise<void> {
-  // Find contexts that still have allowed_projects data but empty mcp_configs
+  const info = await db.execute('PRAGMA table_info(contexts)')
+  const columns = new Set(info.rows.map((r) => r.name))
+  if (!columns.has('allowed_projects') || !columns.has('mcp_configs')) return
+
   const contexts = await db.execute(
     `SELECT c.id, c.bot_id, c.allowed_projects, c.mcp_configs
      FROM contexts c
@@ -172,24 +210,101 @@ async function migrateAllowedProjects(): Promise<void> {
     const allowedProjects = JSON.parse((row.allowed_projects as string) || '[]') as string[]
     if (allowedProjects.length === 0) continue
 
-    // Find the gitnexus MCP server for this bot
     const mcpResult = await db.execute({
       sql: `SELECT id FROM mcp_servers WHERE bot_id = ? AND (name LIKE '%gitnexus%' OR name LIKE '%git%') LIMIT 1`,
       args: [botId],
     })
-
     const mcpServerId = mcpResult.rows[0]?.id as string | undefined
     if (!mcpServerId) continue
 
-    const mcpConfigs = JSON.stringify([{
-      mcpServerId,
-      enabled: true,
-      params: { allowedProjects },
-    }])
-
     await db.execute({
       sql: 'UPDATE contexts SET mcp_configs = ? WHERE id = ?',
-      args: [mcpConfigs, row.id as string],
+      args: [JSON.stringify([{ mcpServerId, enabled: true, params: { allowedProjects } }]), row.id as string],
     })
   }
+}
+
+async function migrateTableBotIdNullable(table: string, createSql: string): Promise<void> {
+  const info = await db.execute(`PRAGMA table_info(${table})`)
+  const botIdCol = info.rows.find((r) => r.name === 'bot_id')
+  if (!botIdCol || botIdCol.notnull === 0) return
+  await db.execute(createSql)
+  const newInfo = await db.execute(`PRAGMA table_info(${table}_new)`)
+  const existingColumns = info.rows.map((r) => r.name as string)
+  const newColumns = new Set(newInfo.rows.map((r) => r.name as string))
+  const sharedColumns = existingColumns.filter((column) => newColumns.has(column))
+  await db.execute(`INSERT INTO ${table}_new (${sharedColumns.join(', ')}) SELECT ${sharedColumns.join(', ')} FROM ${table}`)
+  await db.execute(`DROP TABLE ${table}`)
+  await db.execute(`ALTER TABLE ${table}_new RENAME TO ${table}`)
+}
+
+async function migrateScheduledTasksBotIdNullable(): Promise<void> {
+  await migrateTableBotIdNullable('scheduled_tasks', `
+    CREATE TABLE IF NOT EXISTS scheduled_tasks_new (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      cron_expr TEXT NOT NULL,
+      prompt_template TEXT NOT NULL,
+      target_chat_key TEXT NOT NULL,
+      target_chat_id TEXT NOT NULL,
+      target_chat_name TEXT,
+      context_id TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      last_run_at INTEGER,
+      next_run_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+}
+
+async function migrateMcpServersBotIdNullable(): Promise<void> {
+  await migrateTableBotIdNullable('mcp_servers', `
+    CREATE TABLE IF NOT EXISTS mcp_servers_new (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      url TEXT NOT NULL,
+      transport_type TEXT NOT NULL DEFAULT 'sse',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      param_schema TEXT
+    )
+  `)
+}
+
+async function migrateSkillsBotIdNullable(): Promise<void> {
+  await migrateTableBotIdNullable('skills', `
+    CREATE TABLE IF NOT EXISTS skills_new (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL,
+      type TEXT NOT NULL DEFAULT 'bundle',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      manifest_json TEXT NOT NULL DEFAULT '{}',
+      param_schema TEXT,
+      bundle_path TEXT,
+      bundle_hash TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      resource_index_json TEXT NOT NULL DEFAULT '{}',
+      permission_policy TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+}
+
+async function seedBuiltinMcpServers(): Promise<void> {
+  const wikiMcpUrl = process.env.WIKI_MCP_URL ?? 'http://localhost:3001/sse'
+  const existing = await db.execute({
+    sql: `SELECT id FROM mcp_servers WHERE name = 'wiki-mcp (内置)'`,
+    args: [],
+  })
+  if (existing.rows.length > 0) return
+  const { randomUUID } = await import('crypto')
+  await db.execute({
+    sql: `INSERT INTO mcp_servers (id, bot_id, name, url, transport_type, enabled) VALUES (?, NULL, ?, ?, 'sse', 0)`,
+    args: [randomUUID(), 'wiki-mcp (内置)', wikiMcpUrl],
+  })
 }

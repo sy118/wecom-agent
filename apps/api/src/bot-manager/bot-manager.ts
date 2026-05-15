@@ -21,8 +21,8 @@ export class BotManager extends EventEmitter {
 
     const contexts = await ContextRepository.findByBotId(botId)
     const bindings = await BindingRepository.findByBotId(botId)
-    const mcpServers = await McpServerRepository.findByBotId(botId)
-    const skills = await SkillRepository.findByBotId(botId)
+    const mcpServers = await McpServerRepository.findAll()
+    const skills = await SkillRepository.findAll()
 
     const instance = new BotInstance({ bot, contexts, bindings, mcpServers, skills, db })
 

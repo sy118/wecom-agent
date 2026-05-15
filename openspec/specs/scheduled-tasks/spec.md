@@ -7,23 +7,23 @@
 ## 需求
 
 ### 需求:定时任务 CRUD 管理
-系统必须支持对定时任务的增删改查操作，每个定时任务归属于一个 Bot。
+系统必须支持对定时任务的增删改查操作。
 
 #### 场景:创建定时任务
-- **当** 管理员通过 API POST `/api/bots/:botId/scheduled-tasks` 提交任务配置
+- **当** 管理员通过 API POST `/api/scheduled-tasks` 提交任务配置
 - **那么** 系统必须将任务持久化到 `scheduled_tasks` 表，并在任务 `enabled` 为 true 时立即注册 cron job
 
 #### 场景:更新定时任务
-- **当** 管理员通过 API PUT `/api/bots/:botId/scheduled-tasks/:id` 更新任务
+- **当** 管理员通过 API PUT `/api/scheduled-tasks/:id` 更新任务
 - **那么** 系统必须更新 DB 记录，取消旧 cron job，若 `enabled` 为 true 则重新注册新 cron job
 
 #### 场景:删除定时任务
-- **当** 管理员通过 API DELETE `/api/bots/:botId/scheduled-tasks/:id`
+- **当** 管理员通过 API DELETE `/api/scheduled-tasks/:id`
 - **那么** 系统必须删除 DB 记录并取消对应 cron job
 
 #### 场景:列出定时任务
-- **当** 管理员通过 API GET `/api/bots/:botId/scheduled-tasks`
-- **那么** 系统必须返回该 Bot 下所有任务，包含 `last_run_at`、`next_run_at` 字段
+- **当** 管理员通过 API GET `/api/scheduled-tasks`
+- **那么** 系统必须返回所有任务，包含 `last_run_at`、`next_run_at` 字段
 
 ### 需求:定时任务按 Cron 表达式触发
 系统必须按照任务配置的 `cronExpr`（标准 5 字段 cron 表达式）定时触发任务执行。
@@ -50,6 +50,29 @@
 #### 场景:启动时恢复任务
 - **当** API 服务启动完成
 - **那么** 系统必须查询所有 `enabled=true` 的 `scheduled_tasks` 记录，为每条记录注册对应的 cron job
+
+### 需求:定时任务页面为全局视图并支持目标机器人
+定时任务管理页面必须展示所有全局定时任务，禁止依赖 botId URL 参数。页面路由必须为 `/scheduled-tasks`。新建和编辑定时任务的表单必须包含"目标机器人"字段。
+
+#### 场景:访问全局定时任务列表
+- **当** 用户导航到 `/scheduled-tasks`
+- **那么** 页面必须显示系统中所有定时任务的列表，并在列表中显示每个任务的目标机器人名称
+
+#### 场景:新建定时任务时选择目标机器人
+- **当** 用户在定时任务页面点击"新建任务"
+- **那么** 表单必须包含"目标机器人"下拉选择字段，选项来自系统中所有 Bot，并包含"全部机器人"选项
+
+#### 场景:定时任务目标为全部机器人
+- **当** 用户创建定时任务时选择"全部机器人"
+- **那么** 该任务的 botId 字段必须存储为 null，列表中显示"全部"
+
+#### 场景:定时任务目标为指定机器人
+- **当** 用户创建定时任务时选择某个具体 Bot
+- **那么** 该任务的 botId 字段必须存储对应 Bot 的 ID，列表中显示该 Bot 的名称
+
+#### 场景:旧路由访问被废弃
+- **当** 用户访问 `/bots/:botId/scheduled-tasks`
+- **那么** 该路由禁止存在，应返回 404 或重定向到 `/scheduled-tasks`
 
 ### 需求:前端提供可视化 Cron 编辑器
 前端定时任务表单必须提供可视化 Cron 表达式编辑器，用户无需手写 cron 字符串。

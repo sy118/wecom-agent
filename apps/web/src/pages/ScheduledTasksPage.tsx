@@ -1,17 +1,16 @@
 import { useEffect, useState } from 'react'
 import { Table, Button, Space, Tag, Modal, Form, Input, Switch, Select, message, Popconfirm, Typography, Segmented } from 'antd'
-import { PlusOutlined, ArrowLeftOutlined, CalendarOutlined, ClockCircleOutlined } from '@ant-design/icons'
-import { useParams, useNavigate } from 'react-router-dom'
-import { scheduledTasksApi, contextsApi } from '../api/index.js'
+import { PlusOutlined, CalendarOutlined, ClockCircleOutlined } from '@ant-design/icons'
+import { scheduledTasksApi, botsApi } from '../api/index.js'
 
 interface ScheduledTask {
-  id: string; botId: string; name: string; cronExpr: string; promptTemplate: string
+  id: string; botId: string | null; name: string; cronExpr: string; promptTemplate: string
   targetChatKey: string; targetChatId: string; targetChatName: string | null
   contextId: string | null; enabled: boolean
   lastRunAt: number | null; nextRunAt: number | null
 }
 
-interface Context { id: string; name: string; isDefault: boolean }
+interface Bot { id: string; name: string }
 type ScheduleKind = 'daily' | 'workday' | 'weekly' | 'monthly'
 
 interface ScheduleDraft {
@@ -68,6 +67,11 @@ function toCron(schedule: ScheduleDraft): string {
   return `${base} ${schedule.dayOfMonth} * *`
 }
 
+function clampNumber(value: number, min: number, max: number, fallback: number): number {
+  if (!Number.isFinite(value)) return fallback
+  return Math.min(max, Math.max(min, value))
+}
+
 function parseCron(cronExpr: string): ScheduleDraft {
   const [minuteRaw, hourRaw, dayRaw, monthRaw, weekdayRaw] = cronExpr.trim().split(/\s+/)
   const minute = clampNumber(Number(minuteRaw), 0, 59, DEFAULT_SCHEDULE.minute)
@@ -100,11 +104,6 @@ function parseCron(cronExpr: string): ScheduleDraft {
   return { ...DEFAULT_SCHEDULE, hour, minute }
 }
 
-function clampNumber(value: number, min: number, max: number, fallback: number): number {
-  if (!Number.isFinite(value)) return fallback
-  return Math.min(max, Math.max(min, value))
-}
-
 function describeSchedule(schedule: ScheduleDraft): string {
   const time = `${String(schedule.hour).padStart(2, '0')}:${String(schedule.minute).padStart(2, '0')}`
   if (schedule.kind === 'daily') return `每天 ${time} 执行`
@@ -121,10 +120,8 @@ function describeCron(cronExpr: string): string {
 }
 
 export default function ScheduledTasksPage() {
-  const { botId } = useParams<{ botId: string }>()
-  const navigate = useNavigate()
   const [tasks, setTasks] = useState<ScheduledTask[]>([])
-  const [contexts, setContexts] = useState<Context[]>([])
+  const [bots, setBots] = useState<Bot[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editTask, setEditTask] = useState<ScheduledTask | null>(null)
@@ -134,27 +131,27 @@ export default function ScheduledTasksPage() {
   const load = async () => {
     setLoading(true)
     try {
-      const [taskList, ctxList] = await Promise.all([
-        scheduledTasksApi.list(botId!),
-        contextsApi.list(botId!),
+      const [taskList, botList] = await Promise.all([
+        scheduledTasksApi.list(),
+        botsApi.list(),
       ])
       setTasks(taskList)
-      setContexts(ctxList)
+      setBots(botList)
     } finally {
       setLoading(false)
     }
   }
 
-  useEffect(() => { load() }, [botId])
+  useEffect(() => { load() }, [])
 
   const handleSave = async (values: any) => {
     try {
-      const payload = { ...values, cronExpr: cronValue }
+      const payload = { ...values, cronExpr: cronValue, botId: values.botId ?? null }
       if (editTask) {
-        await scheduledTasksApi.update(botId!, editTask.id, payload)
+        await scheduledTasksApi.update(editTask.id, payload)
         message.success('已更新')
       } else {
-        await scheduledTasksApi.create(botId!, payload)
+        await scheduledTasksApi.create(payload)
         message.success('已创建')
       }
       setModalOpen(false)
@@ -167,13 +164,13 @@ export default function ScheduledTasksPage() {
   }
 
   const handleDelete = async (id: string) => {
-    await scheduledTasksApi.delete(botId!, id)
+    await scheduledTasksApi.delete(id)
     message.success('已删除')
     load()
   }
 
   const handleToggle = async (task: ScheduledTask) => {
-    await scheduledTasksApi.update(botId!, task.id, { enabled: !task.enabled })
+    await scheduledTasksApi.update(task.id, { enabled: !task.enabled })
     load()
   }
 
@@ -193,6 +190,14 @@ export default function ScheduledTasksPage() {
 
   const columns = [
     { title: '任务名称', dataIndex: 'name', key: 'name' },
+    {
+      title: '目标机器人', dataIndex: 'botId', key: 'botId',
+      render: (botId: string | null) => {
+        if (!botId) return <Tag>全部</Tag>
+        const bot = bots.find((b) => b.id === botId)
+        return <Tag color="blue">{bot?.name ?? botId}</Tag>
+      }
+    },
     {
       title: '执行时间', dataIndex: 'cronExpr', key: 'cronExpr',
       render: (v: string) => (
@@ -227,10 +232,7 @@ export default function ScheduledTasksPage() {
   return (
     <div>
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Space>
-          <Button icon={<ArrowLeftOutlined />} onClick={() => navigate('/bots')} />
-          <h2 style={{ margin: 0 }}>定时任务</h2>
-        </Space>
+        <h2 style={{ margin: 0 }}>定时任务</h2>
         <Button type="primary" icon={<PlusOutlined />} onClick={openCreate}>新建任务</Button>
       </div>
       <Table dataSource={tasks} columns={columns} rowKey="id" loading={loading} />
@@ -238,8 +240,17 @@ export default function ScheduledTasksPage() {
       <Modal title={editTask ? '编辑定时任务' : '新建定时任务'} open={modalOpen} width={640}
         onOk={() => form.submit()} onCancel={() => { setModalOpen(false); setEditTask(null) }}>
         <Form form={form} onFinish={handleSave} layout="vertical"
-          initialValues={{ enabled: true, contextId: null }}>
+          initialValues={{ enabled: true, botId: null }}>
           <Form.Item name="name" label="任务名称" rules={[{ required: true }]}><Input /></Form.Item>
+
+          <Form.Item name="botId" label="目标机器人"
+            extra="留空则不绑定特定机器人">
+            <Select
+              allowClear
+              placeholder="全部机器人"
+              options={bots.map((b) => ({ label: b.name, value: b.id }))}
+            />
+          </Form.Item>
 
           <Form.Item label="执行时间" required>
             <ChineseSchedulePicker value={cronValue} onChange={setCronValue} />
@@ -250,32 +261,13 @@ export default function ScheduledTasksPage() {
             <Input.TextArea rows={4} placeholder="例如：请生成今日工作摘要..." />
           </Form.Item>
 
-          <Form.Item name="targetChatId" label="目标群/用户 ID（企业微信原始 ID）" rules={[{ required: true }]}
+          <Form.Item name="targetChatId" label="目标群/用户 ID" rules={[{ required: true }]}
             extra="群聊填 chatid，单聊填 userid">
             <Input placeholder="例如：wrXXXXXX 或 XXXXXXXX" />
           </Form.Item>
 
-          <Form.Item name="targetChatKey" label="内部路由键" rules={[{ required: true }]}
-            extra="格式：wecom:group:chatid 或 wecom:user:userid">
-            <Input placeholder="例如：wecom:group:wrXXXXXX" />
-          </Form.Item>
-
           <Form.Item name="targetChatName" label="群/用户名称（可选）">
             <Input placeholder="便于识别，不影响功能" />
-          </Form.Item>
-
-          <Form.Item name="contextId" label="使用上下文（可选）"
-            extra="留空则使用该 Bot 的默认上下文">
-            <Select
-              allowClear
-              placeholder="默认上下文"
-              options={[
-                ...contexts.map((c) => ({
-                  label: `${c.name}${c.isDefault ? '（默认）' : ''}`,
-                  value: c.id,
-                })),
-              ]}
-            />
           </Form.Item>
 
           <Form.Item name="enabled" label="启用" valuePropName="checked">

@@ -1,12 +1,13 @@
-import React from 'react'
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import LoginPage from './pages/LoginPage.js'
 import BotsPage from './pages/BotsPage.js'
 import ContextsPage from './pages/ContextsPage.js'
 import BindingsPage from './pages/BindingsPage.js'
 import McpServersPage from './pages/McpServersPage.js'
+import SkillsPage from './pages/SkillsPage.js'
 import SessionsPage from './pages/SessionsPage.js'
 import ScheduledTasksPage from './pages/ScheduledTasksPage.js'
+import WikiPage from './pages/WikiPage.js'
 import AppLayout from './components/AppLayout.js'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -24,8 +25,10 @@ export default function App() {
           <Route path="bots" element={<BotsPage />} />
           <Route path="bots/:botId/contexts" element={<ContextsPage />} />
           <Route path="bots/:botId/bindings" element={<BindingsPage />} />
-          <Route path="bots/:botId/mcp-servers" element={<McpServersPage />} />
-          <Route path="bots/:botId/scheduled-tasks" element={<ScheduledTasksPage />} />
+          <Route path="mcp-servers" element={<McpServersPage />} />
+          <Route path="skills" element={<SkillsPage />} />
+          <Route path="scheduled-tasks" element={<ScheduledTasksPage />} />
+          <Route path="wiki" element={<WikiPage />} />
           <Route path="sessions" element={<SessionsPage />} />
         </Route>
       </Routes>
