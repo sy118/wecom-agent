@@ -1,66 +1,64 @@
-# WeCom AI Agent
+# WeChat Work AI Platform
 
-一个集成企业微信（WeCom）与大模型能力的智能助手，基于 LangChain JS 构建，并支持通过 MCP（Model Context Protocol） 协议无缝对接多种外部工具。
+企业微信 AI 运维助手平台——多机器人、多上下文、可视化配置的内网部署方案。
+
+## 架构
+
+```
+wecom-agent/
+├── apps/
+│   ├── api/          # Express 5 API 服务 + Bot 运行时
+│   └── web/          # React 18 + Vite + Ant Design 管理控制台
+├── packages/
+│   ├── core/         # 共享业务逻辑（Agent、MCP、WecomAdapter、SessionStore）
+│   └── types/        # 共享 TypeScript 类型
+├── docker-compose.yml
+└── .env.example
+```
 
 ## 核心功能
 
-- **多 MCP 协议支持**：支持并行接入多个 MCP 工具服务器（如数据库、Git 仓库、API 等），让 AI 具备调用私有工具的能力。
-- **进度反馈机制**：用户发送请求后，机器人会立即回复“任务处理中”的进度卡片，并在 AI 计算完成后自动替换为最终答案，提升交互体验。
-- **消息去重机制**：基于 `msgid` 的去重逻辑，有效防止企业微信因网络重试导致的 AI 重复调用。
-- **多模态消息处理**：支持文本、图片（Vision 能力）、语音、视频及多图文消息的解析与响应。
-- **系统提示词定制**：通过 `src/prompts/system-prompt.md` 灵活配置助手的身份、风格和业务边界。
-- **生产环境就绪**：提供完整的 Docker 部署方案，支持一键发布。
-
-## 配置说明
-
-项目运行需要配置 `.env` 文件。你可以参考以下变量进行设置：
-
-| 变量名 | 说明 | 示例 |
-| :--- | :--- | :--- |
-| `WECOM_BOT_ID` | 企业微信机器人 ID | `wa...` |
-| `WECOM_BOT_SECRET` | 企业微信机器人 Secret | `...` |
-| `WECOM_WS_URL` | 企业微信 WebSocket 服务地址 | `wss://openws.work.weixin.qq.com` |
-| `LLM_API_KEY` | 大模型 API Key | `sk-...` |
-| `LLM_BASE_URL` | 大模型接口 Base URL | `https://api.example.com/v1` |
-| `LLM_MODEL_NAME` | 大模型模型名称 | `MiniMax-M2.5` |
-| `LLM_RECURSION_LIMIT` | 递归限制（控制 ReAct 深度） | `25` |
-| `MCP_SERVERS` | MCP 服务器配置（JSON 数组字符串） | `[{"name":"db","url":"http://ip:1248/sse"}]` |
+- **多机器人管理**：每个机器人独立凭证、LLM 配置和 MCP 工具
+- **多上下文路由**：不同群/用户绑定不同系统提示词和项目范围
+- **多轮对话**：内存会话，30 分钟 TTL，保留最近 20 条消息
+- **并发安全**：per-chatKey 串行消息队列，防止并发处理混乱
+- **可视化管理**：内网 Web 控制台，JWT 认证，实时状态推送
 
 ## 快速开始
 
 ### 本地开发
 
-1. 安装依赖：
-   ```bash
-   npm install
-   ```
-2. 配置环境变量：创建 `.env` 文件并填入上述配置。
-3. 启动开发模式：
-   ```bash
-   npm run dev
-   ```
+```bash
+# 安装依赖
+pnpm install
+
+# 启动 API（端口 3000）
+pnpm dev:api
+
+# 启动 Web（端口 5173）
+pnpm dev:web
+```
 
 ### Docker 部署
 
-1. 构建并部署：
-   ```bash
-   bash deploy.sh
-   ```
-   *注意：`deploy.sh` 包含了构建镜像、导出、传输到远程服务器及远程启动的完整流程，使用前请确保脚本内的服务器信息正确。*
+```bash
+# 复制并填写配置
+cp .env.example .env
 
-2. 使用 Docker Compose 启动：
-   ```bash
-   docker-compose up -d
-   ```
+# 启动所有服务
+docker-compose up -d
+```
 
-## 文件结构
+访问 `http://your-server:8080` 打开管理控制台。
 
-- `src/graph.ts`: 定义智能体的核心逻辑（LangChain Graph）。
-- `src/wecom-adapter.ts`: 负责企业微信 SDK 的集成与消息转发。
-- `src/mcp-client.ts`: 负责连接并管理多个 MCP 服务器。
-- `src/prompts/system-prompt.md`: 助手的系统提示词配置。
+## 环境变量
 
-## 注意事项
+| 变量名 | 说明 | 必填 |
+|---|---|---|
+| `ADMIN_PASSWORD` | 管理控制台登录密码 | 是 |
+| `JWT_SECRET` | JWT 签名密钥 | 是 |
+| `DB_PATH` | SQLite 数据库路径 | 否（默认 `/data/wecom-platform.db`） |
+| `API_PORT` | API 服务端口 | 否（默认 `3000`） |
+| `WEB_PORT` | Web 管理台端口 | 否（默认 `8080`） |
 
-- **并行处理**：当前版本的回复流与 `msgid` 强绑定，确保了高并发请求下的回复唯一性。
-- **去重缓存**：默认在内存中维持最近 1000 条消息的 ID 缓存。如果需要多实例部署，建议将去重逻辑迁移至 Redis。
+机器人配置（企业微信凭证、LLM 配置、MCP 服务器）通过管理控制台 Web UI 进行配置，无需环境变量。
