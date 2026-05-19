@@ -176,6 +176,13 @@ export class BotInstance {
     this.discoveredChats.delete(chatKey)
   }
 
+  upsertContext(context: ContextConfig): void {
+    this.contextMap.set(context.id, context)
+    if (context.isDefault) {
+      this.defaultContext = context
+    }
+  }
+
   async invokeForScheduledTask(prompt: string, systemPrompt: string, targetChatId: string): Promise<string> {
     if (this.deps.bot.provider === 'dify') {
       const scheduledUser = `wecom:scheduled:${targetChatId}`
@@ -325,12 +332,22 @@ export class BotInstance {
     return merged
   }
 
+  private async invokeWithTimeout<T>(tool: { invoke: (args: unknown) => Promise<T> }, args: unknown, timeoutMs: number): Promise<T> {
+    return Promise.race([
+      tool.invoke(args),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error(`Tool invoke timed out after ${timeoutMs}ms`)), timeoutMs)
+      ),
+    ])
+  }
+
   private async executeForceCallMcps(
     systemPrompt: string,
     mcpConfigs: McpConfig[],
     content: string | IncomingContent[]
   ): Promise<string> {
     const results: string[] = []
+    const FORCE_CALL_TIMEOUT_MS = 55_000
     const query = typeof content === 'string'
       ? content
       : content.map((item) => (item.type === 'text' ? item.text : `[图片: ${item.url}]`)).join('\n')
@@ -354,11 +371,11 @@ export class BotInstance {
         const wikiReadTool = findTool('wiki_read')
         if (wikiReadTool) {
           try {
-            const output = await wikiReadTool.invoke({
+            const output = await this.invokeWithTimeout(wikiReadTool, {
               path: forceCallPage,
               namespace,
               max_chars: Number(cfg.params?.maxChars ?? 6000),
-            })
+            }, FORCE_CALL_TIMEOUT_MS)
             results.push(`[wiki_read: ${forceCallPage}]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
           } catch (err) {
             console.error(`[BotInstance:${this.deps.bot.id}] Force-call wiki_read failed:`, err)
@@ -371,11 +388,11 @@ export class BotInstance {
         const wikiSearchTool = findTool('wiki_search')
         if (wikiSearchTool) {
           try {
-            const output = await wikiSearchTool.invoke({
+            const output = await this.invokeWithTimeout(wikiSearchTool, {
               query,
               namespace,
               cross_ns: Boolean(cfg.params?.crossNs),
-            })
+            }, FORCE_CALL_TIMEOUT_MS)
             results.push(`[wiki_search]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
           } catch (err) {
             console.error(`[BotInstance:${this.deps.bot.id}] Force-call wiki_search failed:`, err)
@@ -385,8 +402,10 @@ export class BotInstance {
       }
 
       for (const tool of serverTools) {
+        const shape = (tool as any).schema?.shape
+        if (!shape || !('query' in shape)) continue
         try {
-          const output = await tool.invoke({ query })
+          const output = await this.invokeWithTimeout(tool, { query }, FORCE_CALL_TIMEOUT_MS)
           results.push(`[${tool.name}]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
         } catch (err) {
           console.error(`[BotInstance:${this.deps.bot.id}] Force-call MCP failed: ${tool.name}`, err)
