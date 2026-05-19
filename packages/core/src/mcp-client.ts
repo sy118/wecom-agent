@@ -21,7 +21,7 @@ export async function createMcpTools(mcpServers: McpServerConfig[]) {
         { capabilities: {} }
       )
       await client.connect(transport)
-      const tools = await loadMcpTools(server.name, client, { defaultToolTimeout: 30_000 })
+      const tools = await loadMcpTools(server.name, client, { defaultToolTimeout: 60_000 })
       console.log(`[MCP] Loaded ${tools.length} tools from ${server.name}`)
       allTools.push(...tools)
     } catch (err) {
