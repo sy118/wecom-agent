@@ -78,6 +78,10 @@ export class BotManager extends EventEmitter {
     this.instances.get(botId)?.addBinding(chatKey, contextId)
   }
 
+  upsertContext(botId: string, context: import('@wecom-platform/types').ContextConfig): void {
+    this.instances.get(botId)?.upsertContext(context)
+  }
+
   async invokeForTask(botId: string, prompt: string, systemPrompt: string, targetChatId: string): Promise<string> {
     const instance = this.instances.get(botId)
     if (!instance) throw new Error(`Bot ${botId} is not running`)

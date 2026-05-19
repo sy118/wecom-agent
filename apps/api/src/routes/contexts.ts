@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { ContextRepository } from '../db/context-repository.js'
 import { McpServerRepository } from '../db/mcp-server-repository.js'
 import { SkillRepository } from '../db/skill-repository.js'
+import { botManager } from '../bot-manager/bot-manager.js'
 import type { ContextConfig, McpConfig, SkillConfig } from '@wecom-platform/types'
 
 export const contextsRouter: Router = Router({ mergeParams: true })
@@ -65,7 +66,9 @@ contextsRouter.post('/', async (req, res) => {
   const data = { ...req.body, botId, mcpConfigs: req.body.mcpConfigs ?? [], skillConfigs: req.body.skillConfigs ?? [] }
   const err = await validateContextConfigs(data.mcpConfigs, data.skillConfigs)
   if (err) { res.status(400).json({ error: err }); return }
-  res.status(201).json(await maskContextResponse(await ContextRepository.create(data)))
+  const created = await ContextRepository.create(data)
+  botManager.upsertContext(botId, created)
+  res.status(201).json(await maskContextResponse(created))
 })
 
 contextsRouter.get('/:id', async (req, res) => {
@@ -87,6 +90,7 @@ contextsRouter.put('/:id', async (req, res) => {
   }
   const ctx = await ContextRepository.update(params.id, req.body)
   if (!ctx) { res.status(404).json({ error: 'Context not found' }); return }
+  botManager.upsertContext(params.botId, ctx)
   res.json(await maskContextResponse(ctx))
 })
 

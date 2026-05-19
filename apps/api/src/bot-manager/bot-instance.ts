@@ -176,6 +176,13 @@ export class BotInstance {
     this.discoveredChats.delete(chatKey)
   }
 
+  upsertContext(context: ContextConfig): void {
+    this.contextMap.set(context.id, context)
+    if (context.isDefault) {
+      this.defaultContext = context
+    }
+  }
+
   async invokeForScheduledTask(prompt: string, systemPrompt: string, targetChatId: string): Promise<string> {
     if (this.deps.bot.provider === 'dify') {
       const scheduledUser = `wecom:scheduled:${targetChatId}`
@@ -385,6 +392,8 @@ export class BotInstance {
       }
 
       for (const tool of serverTools) {
+        const shape = (tool as any).schema?.shape
+        if (!shape || !('query' in shape)) continue
         try {
           const output = await tool.invoke({ query })
           results.push(`[${tool.name}]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)

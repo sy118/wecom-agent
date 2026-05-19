@@ -166,8 +166,6 @@ export async function initDb(): Promise<void> {
     UPDATE bots SET status = 'stopped' WHERE status = 'running';
   `)
 
-  await addColumnIfMissing('contexts', 'mcp_configs', "TEXT NOT NULL DEFAULT '[]'")
-  await addColumnIfMissing('contexts', 'skill_configs', "TEXT NOT NULL DEFAULT '[]'")
   await addColumnIfMissing('mcp_servers', 'param_schema', 'TEXT')
   await addColumnIfMissing('skills', 'type', "TEXT NOT NULL DEFAULT 'bundle'")
   await addColumnIfMissing('skills', 'manifest_json', "TEXT NOT NULL DEFAULT '{}'")
@@ -195,33 +193,52 @@ async function addColumnIfMissing(table: string, column: string, definition: str
 async function migrateAllowedProjects(): Promise<void> {
   const info = await db.execute('PRAGMA table_info(contexts)')
   const columns = new Set(info.rows.map((r) => r.name))
-  if (!columns.has('allowed_projects') || !columns.has('mcp_configs')) return
+  if (!columns.has('allowed_projects')) return
 
-  const contexts = await db.execute(
-    `SELECT c.id, c.bot_id, c.allowed_projects, c.mcp_configs
-     FROM contexts c
-     WHERE c.allowed_projects IS NOT NULL AND c.allowed_projects != '[]' AND c.allowed_projects != ''
-       AND (c.mcp_configs IS NULL OR c.mcp_configs = '[]')`
-  )
-  if (contexts.rows.length === 0) return
-
-  for (const row of contexts.rows) {
-    const botId = row.bot_id as string
-    const allowedProjects = JSON.parse((row.allowed_projects as string) || '[]') as string[]
-    if (allowedProjects.length === 0) continue
-
-    const mcpResult = await db.execute({
-      sql: `SELECT id FROM mcp_servers WHERE bot_id = ? AND (name LIKE '%gitnexus%' OR name LIKE '%git%') LIMIT 1`,
-      args: [botId],
-    })
-    const mcpServerId = mcpResult.rows[0]?.id as string | undefined
-    if (!mcpServerId) continue
-
-    await db.execute({
-      sql: 'UPDATE contexts SET mcp_configs = ? WHERE id = ?',
-      args: [JSON.stringify([{ mcpServerId, enabled: true, params: { allowedProjects } }]), row.id as string],
-    })
+  if (columns.has('mcp_configs')) {
+    const contexts = await db.execute(
+      `SELECT id, bot_id, allowed_projects, mcp_configs FROM contexts
+       WHERE allowed_projects IS NOT NULL AND allowed_projects != '[]' AND allowed_projects != ''
+         AND (mcp_configs IS NULL OR mcp_configs = '[]')`
+    )
+    for (const row of contexts.rows) {
+      const botId = row.bot_id as string
+      const allowedProjects = JSON.parse((row.allowed_projects as string) || '[]') as string[]
+      if (allowedProjects.length === 0) continue
+      const mcpResult = await db.execute({
+        sql: `SELECT id FROM mcp_servers WHERE bot_id = ? AND (name LIKE '%gitnexus%' OR name LIKE '%git%') LIMIT 1`,
+        args: [botId],
+      })
+      const mcpServerId = mcpResult.rows[0]?.id as string | undefined
+      if (!mcpServerId) continue
+      await db.execute({
+        sql: 'UPDATE contexts SET mcp_configs = ? WHERE id = ?',
+        args: [JSON.stringify([{ mcpServerId, enabled: true, params: { allowedProjects } }]), row.id as string],
+      })
+    }
   }
+
+  const existingColumns = info.rows.map((r) => r.name as string).filter((c) => c !== 'allowed_projects')
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS contexts_new (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      system_prompt TEXT NOT NULL,
+      mcp_configs TEXT NOT NULL DEFAULT '[]',
+      skill_configs TEXT NOT NULL DEFAULT '[]',
+      session_ttl_min INTEGER NOT NULL DEFAULT 30,
+      is_default INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `)
+  const newInfo = await db.execute('PRAGMA table_info(contexts_new)')
+  const newColumns = new Set(newInfo.rows.map((r) => r.name as string))
+  const shared = existingColumns.filter((c) => newColumns.has(c))
+  await db.execute(`INSERT INTO contexts_new (${shared.join(', ')}) SELECT ${shared.join(', ')} FROM contexts`)
+  await db.execute('DROP TABLE contexts')
+  await db.execute('ALTER TABLE contexts_new RENAME TO contexts')
 }
 
 async function migrateTableBotIdNullable(table: string, createSql: string): Promise<void> {
