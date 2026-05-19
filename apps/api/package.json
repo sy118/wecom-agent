@@ -9,7 +9,7 @@
     "start": "node --env-file=../../.env dist/index.js"
   },
   "dependencies": {
-    "@langchain/core": "^1.1.46",
+    "@langchain/core": "^1.1.47",
     "@libsql/client": "^0.14.0",
     "@wecom-platform/core": "workspace:*",
     "@wecom-platform/types": "workspace:*",
