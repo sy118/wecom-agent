@@ -240,7 +240,7 @@ export default function SkillsPage() {
     setUploading(true)
     try {
       await skillsApi.upload(form)
-      message.success('Skill 文件夹已上传')
+      message.success('技能包文件夹已上传')
       setFileList([])
       await load()
     } catch (err: any) {
@@ -269,13 +269,13 @@ export default function SkillsPage() {
 
   const handleDelete = async (skill: SkillDefinition) => {
     await skillsApi.delete(skill.id)
-    message.success('Skill 已删除')
+    message.success('技能包已删除')
     await load()
   }
 
   const columns = [
     {
-      title: 'Skill',
+      title: '技能包',
       key: 'skill',
       render: (_: unknown, skill: SkillDefinition) => (
         <div>
@@ -326,7 +326,7 @@ export default function SkillsPage() {
         <Space>
           <Button size="small" icon={<EyeOutlined />} onClick={() => openPreview(skill)}>预览</Button>
           <Button size="small" icon={<HistoryOutlined />} onClick={() => openAudit(skill)}>审计</Button>
-          <Popconfirm title="确认删除这个 Skill？" onConfirm={() => handleDelete(skill)}>
+          <Popconfirm title="确认删除这个技能包？" onConfirm={() => handleDelete(skill)}>
             <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
           </Popconfirm>
         </Space>
@@ -339,8 +339,8 @@ export default function SkillsPage() {
       <div className="skill-page-header">
         <div className="skill-title-icon"><UploadOutlined /></div>
         <div className="skill-heading">
-          <h2 style={{ margin: 0 }}>Skills</h2>
-          <div style={{ color: '#666' }}>全局 Skill 能力包，Context 中按需启用</div>
+          <h2 style={{ margin: 0 }}>技能包</h2>
+          <div style={{ color: '#666' }}>全局技能能力包，可在上下文中按需启用</div>
         </div>
         <div className="skill-counts">
           <span className="skill-count-pill">全部 {summary.total}</span>
@@ -353,7 +353,7 @@ export default function SkillsPage() {
       <Alert
         type="info"
         showIcon
-        message="上传包含顶层 SKILL.md 的文件夹。安装后可在任意 Bot 的上下文配置中启用。"
+        message="上传包含顶层 SKILL.md 的文件夹。安装后可在任意机器人的上下文配置中启用。"
       />
 
       <div
@@ -372,7 +372,7 @@ export default function SkillsPage() {
           {...directoryInputProps}
         />
         <InboxOutlined className="skill-upload-icon" />
-        <div className="skill-upload-title">选择或拖入 Skill 文件夹</div>
+        <div className="skill-upload-title">选择或拖入技能包文件夹</div>
         <div className="skill-upload-subtitle">目录中必须包含顶层 SKILL.md，可选包含 scripts、references、assets。</div>
       </div>
 
@@ -397,7 +397,7 @@ export default function SkillsPage() {
         loading={uploading}
         onClick={handleUpload}
       >
-        上传 Skill 文件夹
+        上传技能包文件夹
       </Button>
 
       <Table
@@ -405,11 +405,11 @@ export default function SkillsPage() {
         loading={loading}
         dataSource={skills}
         columns={columns}
-        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有 Skill" /> }}
+        locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="还没有技能包" /> }}
       />
 
       <Modal
-        title={`${activeSkill?.name ?? 'Skill'} / SKILL.md`}
+        title={`${activeSkill?.name ?? '技能包'} / SKILL.md`}
         open={previewOpen}
         width={820}
         footer={null}
@@ -419,7 +419,7 @@ export default function SkillsPage() {
       </Modal>
 
       <Modal
-        title={`${activeSkill?.name ?? 'Skill'} 的脚本审计`}
+        title={`${activeSkill?.name ?? '技能包'} 的脚本审计`}
         open={auditOpen}
         width={980}
         footer={null}
@@ -432,7 +432,7 @@ export default function SkillsPage() {
           columns={[
             { title: '状态', dataIndex: 'status', key: 'status', render: (v: string) => <Tag>{v}</Tag> },
             { title: '耗时', dataIndex: 'durationMs', key: 'durationMs', render: (v: number) => `${v}ms` },
-            { title: 'Context', dataIndex: 'contextId', key: 'contextId' },
+            { title: '上下文', dataIndex: 'contextId', key: 'contextId' },
             { title: 'chatKey', dataIndex: 'chatKey', key: 'chatKey' },
             { title: '输入', dataIndex: 'inputPreview', key: 'inputPreview', ellipsis: true },
             { title: '输出', dataIndex: 'outputPreview', key: 'outputPreview', ellipsis: true },

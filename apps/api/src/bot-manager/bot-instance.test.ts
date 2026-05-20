@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test, { after } from 'node:test'
 import type { StructuredTool } from '@langchain/core/tools'
-import type { BotConfig, SkillDefinition } from '@wecom-platform/types'
+import type { Binding, BotConfig, ContextConfig, McpServerConfig, SkillDefinition } from '@wecom-platform/types'
 
 const tempDir = await mkdtemp(join(tmpdir(), 'wecom-bot-instance-'))
 process.env.DB_PATH = join(tempDir, 'bot-instance-test.db')
@@ -12,9 +12,11 @@ process.env.DB_PATH = join(tempDir, 'bot-instance-test.db')
 const [
   botInstanceModule,
   { db, initDb },
+  { WikiRetrievalLogRepository },
 ] = await Promise.all([
   import('./bot-instance.js'),
   import('../db/client.js'),
+  import('../db/wiki-retrieval-log-repository.js'),
 ])
 
 const {
@@ -107,6 +109,48 @@ function makeInstance(skills: SkillDefinition[] = []) {
   })
 }
 
+function makeContext(overrides: Partial<ContextConfig> = {}): ContextConfig {
+  return {
+    id: 'context-1',
+    botId: 'bot-1',
+    name: 'Context',
+    systemPrompt: 'Base prompt',
+    mcpConfigs: [],
+    skillConfigs: [],
+    sessionTtlMin: 30,
+    isDefault: false,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  }
+}
+
+function makeBinding(overrides: Partial<Binding> = {}): Binding {
+  return {
+    id: 'binding-1',
+    botId: 'bot-1',
+    contextId: 'context-1',
+    chatKey: 'wecom:group:old',
+    chatName: 'Old chat',
+    chatType: 'group',
+    createdAt: 1,
+    ...overrides,
+  }
+}
+
+function makeMcpServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
+  return {
+    id: 'mcp-1',
+    botId: null,
+    name: 'mcp-1',
+    url: 'http://127.0.0.1:1/sse',
+    transportType: 'sse',
+    enabled: false,
+    paramSchema: [],
+    ...overrides,
+  }
+}
+
 test('Vision fallback retries without prior session history', () => {
   const priorMessages = [
     { role: 'human' as const, content: '上一张图是什么?', timestamp: 1 },
@@ -178,6 +222,87 @@ test('BotInstance resolves one generic Skill script tool for enabled script bund
   }
 })
 
+test('BotInstance reloads runtime contexts and bindings', () => {
+  const oldContext = makeContext({ id: 'old-context', isDefault: true })
+  const oldBinding = makeBinding({ contextId: oldContext.id, chatKey: 'wecom:group:old' })
+  const instance = new BotInstance({
+    bot: makeBot(),
+    contexts: [oldContext],
+    bindings: [oldBinding],
+    mcpServers: [],
+    skills: [],
+    db: db as any,
+  })
+  try {
+    assert.equal((instance as any).defaultContext.id, oldContext.id)
+    assert.equal((instance as any).bindingMap.get(oldBinding.chatKey), oldContext.id)
+
+    const newContext = makeContext({ id: 'new-context', isDefault: true })
+    const newBinding = makeBinding({ id: 'binding-2', contextId: newContext.id, chatKey: 'wecom:group:new' })
+    ;(instance as any).discoveredChats.set(newBinding.chatKey, {
+      chatKey: newBinding.chatKey,
+      chatType: 'group',
+      firstSeenAt: 1,
+    })
+
+    instance.reloadContexts([newContext])
+    instance.reloadBindings([newBinding])
+
+    assert.equal((instance as any).contextMap.has(oldContext.id), false)
+    assert.equal((instance as any).defaultContext.id, newContext.id)
+    assert.equal((instance as any).bindingMap.get(oldBinding.chatKey), undefined)
+    assert.equal((instance as any).bindingMap.get(newBinding.chatKey), newContext.id)
+    assert.equal((instance as any).discoveredChats.has(newBinding.chatKey), false)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance reloads runtime Skills and removes disabled entries', async () => {
+  const skill = await makeSkill('runtime-skill', ['scripts/echo.js'])
+  const instance = makeInstance([])
+  try {
+    instance.reloadSkills([skill])
+    const enabledTools = (instance as any).resolveSkillTools(
+      [{ skillId: skill.id, enabled: true, params: {} }],
+      {
+        botId: 'bot-1',
+        contextId: 'context-1',
+        chatKey: 'chat-1',
+        content: 'hello',
+      }
+    ) as StructuredTool[]
+    assert.deepEqual(enabledTools.map((tool) => tool.name), ['run_skill_script'])
+
+    instance.reloadSkills([{ ...skill, enabled: false }])
+    const disabledTools = (instance as any).resolveSkillTools(
+      [{ skillId: skill.id, enabled: true, params: {} }],
+      {
+        botId: 'bot-1',
+        contextId: 'context-1',
+        chatKey: 'chat-1',
+        content: 'hello',
+      }
+    ) as StructuredTool[]
+    assert.deepEqual(disabledTools, [])
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance reloads MCP server pools and drops removed servers', async () => {
+  const instance = makeInstance()
+  try {
+    ;(instance as any).toolPool.set('old-mcp', [{ name: 'old_tool' }])
+
+    await instance.reloadMcpServers([makeMcpServer({ id: 'disabled-mcp', enabled: false })])
+
+    assert.equal((instance as any).toolPool.size, 0)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
 test('BotInstance force-calls Wiki autoSearch policy with namespace', async () => {
   const instance = makeInstance()
   try {
@@ -187,7 +312,7 @@ test('BotInstance force-calls Wiki autoSearch policy with namespace', async () =
         name: 'wiki_search',
         invoke: async (input: any) => {
           calls.push(input)
-          return 'matched refund.md'
+          return '[product] Refund (faq/refund.md)\nmatched refund.md'
         },
       },
     ])
@@ -204,6 +329,13 @@ test('BotInstance force-calls Wiki autoSearch policy with namespace', async () =
     assert.equal(calls.length, 1)
     assert.deepEqual(calls[0], { query: 'refund policy', namespace: 'product', cross_ns: false })
     assert.match(prompt, /matched refund\.md/)
+    const logs = await WikiRetrievalLogRepository.findByNamespace('product', { limit: 10 })
+    assert.equal(logs.some((log) =>
+      log.policy === 'autoSearch' &&
+      log.query === 'refund policy' &&
+      log.hitCount === 1 &&
+      log.hitPaths.includes('faq/refund.md')
+    ), true)
   } finally {
     ;(instance as any).sessions.destroy()
   }
@@ -234,7 +366,44 @@ test('BotInstance force-calls Wiki fixedPage policy with max chars', async () =>
     assert.equal(calls.length, 1)
     assert.deepEqual(calls[0], { path: 'rules/sop.md', namespace: 'product', max_chars: 1200 })
     assert.match(prompt, /# SOP/)
+    const logs = await WikiRetrievalLogRepository.findByNamespace('product', { limit: 10 })
+    assert.equal(logs.some((log) =>
+      log.policy === 'fixedPage' &&
+      log.query === 'rules/sop.md' &&
+      log.hitCount === 1 &&
+      log.hitPaths.includes('rules/sop.md')
+    ), true)
   } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance keeps reply flow when Wiki retrieval logging fails', async () => {
+  const instance = makeInstance()
+  const originalCreate = WikiRetrievalLogRepository.create
+  try {
+    ;(WikiRetrievalLogRepository as any).create = async () => {
+      throw new Error('log write failed')
+    }
+    ;(instance as any).toolPool.set('wiki-mcp', [
+      {
+        name: 'wiki_search',
+        invoke: async () => '[support] SOP (rules/sop.md)\nmatched sop.md',
+      },
+    ])
+
+    const prompt = await (instance as any).executeForceCallMcps('base prompt', [
+      {
+        mcpServerId: 'wiki-mcp',
+        enabled: true,
+        forceCall: true,
+        params: { namespace: 'support', retrievalPolicy: 'autoSearch' },
+      },
+    ], 'sop')
+
+    assert.match(prompt, /matched sop\.md/)
+  } finally {
+    ;(WikiRetrievalLogRepository as any).create = originalCreate
     ;(instance as any).sessions.destroy()
   }
 })

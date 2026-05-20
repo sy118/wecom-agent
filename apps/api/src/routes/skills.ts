@@ -4,6 +4,7 @@ import { Router } from 'express'
 import multer from 'multer'
 import { SkillRepository } from '../db/skill-repository.js'
 import { SkillAuditRepository } from '../db/skill-audit-repository.js'
+import { botManager } from '../bot-manager/bot-manager.js'
 import {
   defaultPermissionPolicy,
   installSkillBundle,
@@ -48,6 +49,7 @@ skillsRouter.post('/upload', upload.array('files'), async (req, res) => {
       resourceIndex: bundle.resourceIndex,
       permissionPolicy: defaultPermissionPolicy(),
     })
+    await botManager.refreshSkills()
     res.status(201).json(skill)
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Invalid Skill upload' })
@@ -81,6 +83,7 @@ skillsRouter.put('/:id', async (req, res) => {
     enabled: req.body.enabled,
     permissionPolicy: req.body.permissionPolicy ? defaultPermissionPolicy(req.body.permissionPolicy) : undefined,
   })
+  await botManager.refreshSkills()
   res.json(skill)
 })
 
@@ -89,6 +92,7 @@ skillsRouter.delete('/:id', async (req, res) => {
   const existing = await SkillRepository.findById(id)
   if (!existing) { res.status(404).json({ error: 'Skill not found' }); return }
   await SkillRepository.delete(id)
+  await botManager.refreshSkills()
   await removeSkillBundle(existing)
   res.status(204).send()
 })

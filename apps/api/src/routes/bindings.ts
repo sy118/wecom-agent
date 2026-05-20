@@ -19,12 +19,13 @@ bindingsRouter.post('/', async (req, res) => {
   const { botId } = req.params as { botId: string }
   const data = { ...req.body, botId }
   const binding = await BindingRepository.upsert(data)
-  // Sync in-memory binding map so running bot picks it up immediately
-  botManager.addBinding(botId, data.chatKey, data.contextId)
+  await botManager.refreshBindings(botId)
   res.status(201).json(binding)
 })
 
 bindingsRouter.delete('/:id', async (req, res) => {
+  const { botId } = req.params as { botId: string; id: string }
   await BindingRepository.delete(req.params.id)
+  await botManager.refreshBindings(botId)
   res.status(204).send()
 })

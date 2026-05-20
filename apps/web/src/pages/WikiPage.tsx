@@ -70,8 +70,50 @@ interface WikiDraft {
   sourceType: string
   sourceRef: string | null
   status: 'pending' | 'merged' | 'rejected'
+  mergeStrategy?: 'append' | 'replace' | 'createOnly'
   reviewReason: string | null
   createdAt: number
+}
+
+interface RetrievalLog {
+  id: string
+  policy: string
+  query: string
+  hitCount: number
+  hitPaths: string[]
+  durationMs: number | null
+  error: string | null
+  contextId: string | null
+  chatKey: string | null
+  createdAt: number
+}
+
+interface MissSummary {
+  query: string
+  count: number
+  latestAt: number
+  contextIds: string[]
+  chatKeys: string[]
+}
+
+interface WikiMetrics {
+  fileCount: number
+  bindingCount: number
+  pendingDraftCount: number
+  latestModifiedAt: number | null
+  retrievalCount: number
+  missCount: number
+  hotDocuments: Array<{ path: string; hitCount: number }>
+  topMisses: MissSummary[]
+}
+
+interface DraftDiff {
+  strategy: 'append' | 'replace' | 'createOnly'
+  targetExists: boolean
+  currentContent: string
+  nextContent: string
+  diff: string[]
+  error: string | null
 }
 
 interface McpServer { id: string; name: string; url: string; transportType: string; enabled: boolean; paramSchema?: unknown[] }
@@ -89,6 +131,23 @@ function policyLabel(policy: RetrievalPolicy | string) {
   return '手动工具调用'
 }
 
+function statusLabel(status?: string) {
+  if (status === 'pending') return '待审核'
+  if (status === 'merged') return '已合并'
+  if (status === 'rejected') return '已拒绝'
+  return status ?? '未知'
+}
+
+function sourceTypeLabel(sourceType?: string) {
+  if (sourceType === 'manual') return '手动创建'
+  if (sourceType === 'retrieval-miss') return '无命中问题'
+  if (sourceType === 'bot') return '机器人'
+  if (sourceType === 'skill') return '技能'
+  if (sourceType === 'scheduled-task') return '定时任务'
+  if (sourceType === 'test') return '测试'
+  return sourceType ?? '未知来源'
+}
+
 function healthColor(status: HealthStatus) {
   if (status === 'ok') return 'green'
   if (status === 'warning') return 'gold'
@@ -96,8 +155,113 @@ function healthColor(status: HealthStatus) {
   return 'default'
 }
 
+function healthStatusLabel(status: HealthStatus | string) {
+  if (status === 'ok') return '正常'
+  if (status === 'warning') return '需关注'
+  if (status === 'error') return '异常'
+  return '未检测'
+}
+
+function healthItemLabel(key: string) {
+  const labels: Record<string, string> = {
+    rootConfigured: '根目录配置',
+    rootExists: '根目录状态',
+    gitRepo: 'Git 仓库',
+    gitRemote: 'Git 远端',
+    wikiMcp: 'Wiki 工具服务',
+    mcpServer: 'MCP 服务配置',
+    namespaces: '知识库空间',
+    contextBindings: '上下文绑定',
+    botRuntime: '机器人运行',
+  }
+  return labels[key] ?? key
+}
+
+function formatHealthMessage(message?: string) {
+  if (!message) return '暂无说明'
+  const exact: Record<string, string> = {
+    'not checked': '未检测',
+    'WIKI_ROOT is not configured': '未配置 WIKI_ROOT',
+    'WIKI_ROOT directory does not exist': 'WIKI_ROOT 目录不存在',
+    'WIKI_ROOT configured': '已配置 Wiki 根目录',
+    'WIKI_ROOT is missing': '缺少 WIKI_ROOT 配置',
+    'Directory exists': '目录存在',
+    'Directory missing': '目录不存在',
+    'Git repository is available': 'Git 仓库可用',
+    'Git repository unavailable': 'Git 仓库不可用',
+    'No Git remote configured': '尚未配置 Git 远端',
+    'wiki-mcp health endpoint is reachable': 'wiki-mcp 健康接口可访问',
+    'wiki-mcp server exists but is disabled': '已存在 wiki-mcp 服务，但尚未启用',
+    'wiki-mcp server is not configured': '尚未配置 wiki-mcp 服务',
+    'No Wiki namespace configured': '尚未创建 Wiki 知识库空间',
+    'No Context is bound to Wiki': '尚未将上下文绑定到 Wiki',
+    'No Wiki-bound Bot to check': '暂无绑定 Wiki 的机器人可检测',
+    'Wiki-bound Bot(s) are not running': '绑定 Wiki 的机器人未运行',
+  }
+  if (exact[message]) return exact[message]
+  const remoteMatch = message.match(/^(\d+) remote\(s\) configured$/)
+  if (remoteMatch) return `已配置 ${remoteMatch[1]} 个 Git 远端`
+  const mcpMatch = message.match(/^(\d+) enabled wiki-mcp server\(s\)$/)
+  if (mcpMatch) return `已启用 ${mcpMatch[1]} 个 wiki-mcp 服务`
+  const nsMatch = message.match(/^(\d+) namespace\(s\) configured$/)
+  if (nsMatch) return `已配置 ${nsMatch[1]} 个知识库空间`
+  const bindingMatch = message.match(/^(\d+) context binding\(s\) configured$/)
+  if (bindingMatch) return `已配置 ${bindingMatch[1]} 个上下文绑定`
+  const botMatch = message.match(/^(\d+)\/(\d+) Wiki-bound Bot\(s\) running$/)
+  if (botMatch) return `已运行 ${botMatch[1]}/${botMatch[2]} 个绑定 Wiki 的机器人`
+  const mcpStatusMatch = message.match(/^wiki-mcp returned (\d+)$/)
+  if (mcpStatusMatch) return `wiki-mcp 返回 ${mcpStatusMatch[1]}`
+  return message
+}
+
+function wikiErrorText(raw: unknown, fallback: string) {
+  const text = typeof raw === 'string' ? raw : ''
+  const exact: Record<string, string> = {
+    'WIKI_ROOT is not configured': '尚未配置 Wiki 根目录，请先设置 WIKI_ROOT',
+    'namespace not found': '知识库空间不存在或已被删除',
+    'name, display_name and path are required': '请填写标识符、展示名称和目录路径',
+    'name must use kebab-case lowercase letters, numbers and dashes': '标识符只能使用小写字母、数字和短横线',
+    'invalid namespace path': '目录路径无效，请使用相对路径',
+    'namespace already exists': '知识库空间标识已存在，请换一个标识符',
+    'contextId is required': '请选择要绑定的上下文',
+    'context not found': '上下文不存在或已被删除',
+    'context does not belong to botId': '所选上下文不属于当前机器人',
+    'wiki-mcp server is not configured': '尚未配置 wiki-mcp 服务',
+    'selected MCP server is not wiki-mcp': '请选择 wiki-mcp 类型的 MCP 服务',
+    'wiki-mcp server is disabled': 'wiki-mcp 服务未启用，请先启用后再绑定',
+    'binding not found': '未找到对应绑定',
+    'targetPath and content are required': '请填写目标页面和草稿内容',
+    'draft not found': '草稿不存在或已被删除',
+    'draft is not pending': '只有待审核草稿可以继续操作',
+    'invalid target path': '目标页面路径无效，请使用相对路径',
+    'content is required': '草稿内容不能为空',
+    'target file already exists': '目标页面已存在，不能使用“仅创建新页面”策略',
+    'invalid path': '路径无效，请使用相对路径',
+    'file not found': '文件不存在或已被删除',
+  }
+  if (exact[text]) return exact[text]
+  if (/already exists/i.test(text) && /namespace/i.test(text)) return exact['namespace already exists']
+  if (/target file already exists/i.test(text)) return exact['target file already exists']
+  if (/not configured/i.test(text) && /WIKI_ROOT/i.test(text)) return exact['WIKI_ROOT is not configured']
+  return text || fallback
+}
+
+function wikiErrorMessage(err: unknown, fallback: string) {
+  return wikiErrorText((err as any)?.response?.data?.error ?? (err instanceof Error ? err.message : ''), fallback)
+}
+
 function formatTime(value?: number | null) {
   return value ? new Date(value).toLocaleString() : '暂无'
+}
+
+function formatDuration(value?: number | null) {
+  return value === null || value === undefined ? '未知' : `${value} ms`
+}
+
+function strategyLabel(strategy?: string) {
+  if (strategy === 'replace') return '覆盖'
+  if (strategy === 'createOnly') return '仅创建'
+  return '追加'
 }
 
 function fileNodesToTreeData(nodes: FileNode[], onDelete: (path: string) => void): DataNode[] {
@@ -136,8 +300,12 @@ export default function WikiPage() {
   const [selectedFile, setSelectedFile] = useState<WikiFile | null>(null)
   const [health, setHealth] = useState<any>(null)
   const [namespaceHealth, setNamespaceHealth] = useState<any>(null)
+  const [namespaceSummaries, setNamespaceSummaries] = useState<Record<string, any>>({})
+  const [metrics, setMetrics] = useState<WikiMetrics | null>(null)
   const [bindings, setBindings] = useState<WikiBinding[]>([])
   const [drafts, setDrafts] = useState<WikiDraft[]>([])
+  const [retrievalLogs, setRetrievalLogs] = useState<RetrievalLog[]>([])
+  const [misses, setMisses] = useState<MissSummary[]>([])
   const [mcpServers, setMcpServers] = useState<McpServer[]>([])
   const [bots, setBots] = useState<Bot[]>([])
   const [allBindingCount, setAllBindingCount] = useState(0)
@@ -155,14 +323,23 @@ export default function WikiPage() {
   const [testResults, setTestResults] = useState<SearchResult[]>([])
   const [testPreview, setTestPreview] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState('documents')
+  const [draftDetailOpen, setDraftDetailOpen] = useState(false)
+  const [activeDraft, setActiveDraft] = useState<WikiDraft | null>(null)
+  const [activeDraftStrategy, setActiveDraftStrategy] = useState<'append' | 'replace' | 'createOnly'>('append')
+  const [activeDraftDiff, setActiveDraftDiff] = useState<DraftDiff | null>(null)
   const [createForm] = Form.useForm()
   const [wizardForm] = Form.useForm()
   const [bindForm] = Form.useForm()
   const [draftForm] = Form.useForm()
+  const [draftEditForm] = Form.useForm()
 
   const wikiMcp = useMemo(() => mcpServers.find((server) => server.enabled && isWikiMcpServer(server)), [mcpServers])
   const wikiMcpCandidate = useMemo(() => mcpServers.find(isWikiMcpServer), [mcpServers])
   const shouldShowWizard = namespaces.length === 0 || !wikiMcp || allBindingCount === 0
+
+  const remindBotRestart = () => {
+    message.info('配置已保存，运行中的关联机器人会自动加载最新 Wiki 工具')
+  }
 
   const refreshAll = async () => {
     setLoading(true)
@@ -178,6 +355,8 @@ export default function WikiPage() {
       setMcpServers(mcpList)
       setBots(botList)
       const summaries = await Promise.all(nsList.map((ns: WikiNamespace) => wikiApi.bindings(ns.name).catch(() => [])))
+      const healthSummaries = await Promise.all(nsList.map((ns: WikiNamespace) => wikiApi.namespaceHealth(ns.name).catch(() => null)))
+      setNamespaceSummaries(Object.fromEntries(nsList.map((ns: WikiNamespace, index: number) => [ns.name, healthSummaries[index]])))
       setAllBindingCount(summaries.reduce((sum, item) => sum + item.length, 0))
     } finally {
       setLoading(false)
@@ -187,16 +366,22 @@ export default function WikiPage() {
   const refreshNamespace = async (ns: WikiNamespace) => {
     setTreeLoading(true)
     try {
-      const [tree, nsHealth, bindingList, draftList] = await Promise.all([
+      const [tree, nsHealth, bindingList, draftList, metricData, logData, missData] = await Promise.all([
         wikiApi.listFiles(ns.name),
         wikiApi.namespaceHealth(ns.name),
         wikiApi.bindings(ns.name),
         wikiApi.listDrafts(ns.name),
+        wikiApi.metrics(ns.name),
+        wikiApi.retrievalLogs(ns.name),
+        wikiApi.misses(ns.name),
       ])
       setFileTree(tree)
       setNamespaceHealth(nsHealth)
       setBindings(bindingList)
       setDrafts(draftList)
+      setMetrics(metricData)
+      setRetrievalLogs(logData.logs ?? [])
+      setMisses(missData.misses ?? [])
     } finally {
       setTreeLoading(false)
     }
@@ -218,13 +403,13 @@ export default function WikiPage() {
   const handleCreate = async (values: { name: string; display_name: string; path: string; description?: string }) => {
     try {
       const ns = await wikiApi.createNamespace(values)
-      message.success('Namespace 已创建')
+      message.success('知识库空间已创建')
       setCreateOpen(false)
       createForm.resetFields()
       await refreshAll()
       handleSelectNamespace(ns)
     } catch (err: any) {
-      message.error(err?.response?.data?.error ?? '创建失败')
+      message.error(wikiErrorMessage(err, '创建失败'))
     }
   }
 
@@ -246,7 +431,7 @@ export default function WikiPage() {
       refreshAll()
       if (selected) refreshNamespace(selected)
     } catch {
-      message.error('Git Pull 失败')
+      message.error('同步最新失败')
     }
   }
 
@@ -290,9 +475,12 @@ export default function WikiPage() {
 
   const handleSearch = async (query = searchQuery) => {
     if (!selected || !query.trim()) return
+    const startedAt = Date.now()
     const result = await wikiApi.search(selected.name, query)
     setSearchAttempted(true)
     setSearchResults(result.results ?? [])
+    setTestResults(result.results ?? [])
+    setTestPreview(`检索词：${result.query ?? query}\n命中：${result.hitCount ?? result.results?.length ?? 0}\n耗时：${result.durationMs ?? Date.now() - startedAt} ms`)
     refreshNamespace(selected)
   }
 
@@ -304,21 +492,22 @@ export default function WikiPage() {
     })
     if (fixedPageBinding) {
       try {
+        const startedAt = Date.now()
         const path = String(fixedPageBinding.params.forceCallPage)
         const maxChars = Number(fixedPageBinding.params.maxChars ?? 6000)
         const file = await wikiApi.getFile(selected.name, path)
         setTestResults([])
-        setTestPreview(String(file.content ?? '').slice(0, maxChars))
+        setTestPreview(`固定页面: ${path}\n耗时: ${Date.now() - startedAt} ms\n\n${String(file.content ?? '').slice(0, maxChars)}`)
         refreshNamespace(selected)
       } catch (err: any) {
-        message.error(err?.response?.data?.error ?? '固定页面读取失败')
+        message.error(wikiErrorMessage(err, '固定页面读取失败'))
       }
       return
     }
     if (!testQuery.trim()) return
     const result = await wikiApi.search(selected.name, testQuery)
     setTestResults(result.results ?? [])
-    setTestPreview(null)
+    setTestPreview(`检索词：${result.query ?? testQuery}\n命中：${result.hitCount ?? result.results?.length ?? 0}\n耗时：${result.durationMs ?? 0} ms`)
     refreshNamespace(selected)
   }
 
@@ -329,7 +518,7 @@ export default function WikiPage() {
 
   const openBind = () => {
     if (!wikiMcp) {
-      message.warning('请先启用 wiki-mcp，再绑定 Context')
+      message.warning('请先启用 wiki-mcp，再绑定上下文')
       return
     }
     setBindOpen(true)
@@ -343,11 +532,12 @@ export default function WikiPage() {
     try {
       await wikiApi.bindContext(selected.name, values)
       message.success('绑定已保存')
+      remindBotRestart()
       setBindOpen(false)
       refreshAll()
       refreshNamespace(selected)
     } catch (err: any) {
-      message.error(err?.response?.data?.error ?? '绑定失败')
+      message.error(wikiErrorMessage(err, '绑定失败'))
     }
   }
 
@@ -361,23 +551,25 @@ export default function WikiPage() {
 
   const registerWikiMcp = async () => {
     const recommendedParamSchema = [
-      { key: 'namespace', label: 'Wiki Namespace', type: 'string', description: '要查询的 Wiki namespace' },
-      { key: 'retrievalPolicy', label: '检索策略', type: 'string', description: 'manual / autoSearch / fixedPage' },
-      { key: 'forceCallPage', label: '固定页面', type: 'string', description: 'fixedPage 策略使用' },
+      { key: 'namespace', label: 'Wiki 知识库标识', type: 'string', description: '要查询的 Wiki 知识库空间' },
+      { key: 'retrievalPolicy', label: '检索策略', type: 'string', description: '手动 / 自动搜索 / 固定页面' },
+      { key: 'forceCallPage', label: '固定页面', type: 'string', description: '固定页面策略使用' },
       { key: 'maxChars', label: '最大字符数', type: 'number', description: '固定页面注入截断长度' },
-      { key: 'crossNs', label: '跨 namespace', type: 'boolean', description: 'autoSearch 是否跨 namespace' },
+      { key: 'crossNs', label: '跨知识库搜索', type: 'boolean', description: '自动搜索是否跨知识库空间' },
     ]
+    const recommendedUrl = health?.wikiMcpUrl ? `${String(health.wikiMcpUrl).replace(/\/$/, '')}/sse` : 'http://127.0.0.1:3001/sse'
     const created = wikiMcpCandidate ? await mcpServersApi.update(wikiMcpCandidate.id, {
       enabled: true,
       paramSchema: wikiMcpCandidate.paramSchema?.length ? wikiMcpCandidate.paramSchema : recommendedParamSchema,
     }) : await mcpServersApi.create({
       name: 'wiki-mcp',
-      url: 'http://localhost:3001/sse',
+      url: recommendedUrl,
       transportType: 'sse',
       enabled: true,
       paramSchema: recommendedParamSchema,
     })
     message.success(wikiMcpCandidate ? 'wiki-mcp 已启用' : 'wiki-mcp 已注册')
+    remindBotRestart()
     await refreshAll()
     return created
   }
@@ -403,6 +595,7 @@ export default function WikiPage() {
       if (!targetNs) return
       const targetMcp = wikiMcp ?? await registerWikiMcp()
       await wikiApi.bindContext(targetNs.name, { ...values, mcpServerId: targetMcp.id })
+      remindBotRestart()
       await refreshAll()
       await refreshNamespace(targetNs)
       setWizardStep(3)
@@ -436,35 +629,95 @@ export default function WikiPage() {
     refreshNamespace(selected)
   }
 
+  const createDraftFromMiss = async (miss: MissSummary) => {
+    if (!selected) return
+    setActiveTab('drafts')
+    draftForm.setFieldsValue({
+      targetPath: `待补充/${Date.now()}.md`,
+      content: `# ${miss.query}\n\n> 来源：无命中问题，出现 ${miss.count} 次。\n\n请补充标准答案。`,
+      sourceRef: `retrieval-miss:${miss.query}`,
+    })
+  }
+
+  const loadDraftDiff = async (draft: WikiDraft, strategy = activeDraftStrategy) => {
+    if (!selected) return
+    try {
+      setActiveDraftDiff(await wikiApi.draftDiff(selected.name, draft.id, strategy))
+    } catch (err: any) {
+      setActiveDraftDiff(null)
+      message.error(wikiErrorMessage(err, '读取差异失败'))
+    }
+  }
+
+  const openDraftDetail = async (draft: WikiDraft) => {
+    const strategy = draft.mergeStrategy ?? 'append'
+    setActiveDraft(draft)
+    setActiveDraftStrategy(strategy)
+    setDraftDetailOpen(true)
+    draftEditForm.setFieldsValue({
+      targetPath: draft.targetPath,
+      content: draft.content,
+      sourceRef: draft.sourceRef,
+      mergeStrategy: strategy,
+    })
+    await loadDraftDiff(draft, strategy)
+  }
+
+  const saveDraftDetail = async () => {
+    if (!selected || !activeDraft) return
+    const values = await draftEditForm.validateFields()
+    const updated = await wikiApi.updateDraft(selected.name, activeDraft.id, values)
+    setActiveDraft(updated)
+    setActiveDraftStrategy(updated.mergeStrategy ?? values.mergeStrategy ?? 'append')
+    message.success('草稿已保存')
+    await loadDraftDiff(updated, updated.mergeStrategy ?? values.mergeStrategy ?? 'append')
+    refreshNamespace(selected)
+  }
+
   const approveDraft = async (draft: WikiDraft) => {
     if (!selected) return
     try {
-      await wikiApi.approveDraft(selected.name, draft.id)
+      await wikiApi.approveDraft(selected.name, draft.id, { mergeStrategy: activeDraft?.id === draft.id ? activeDraftStrategy : draft.mergeStrategy ?? 'append' })
       message.success('草稿已合并')
+      setDraftDetailOpen(false)
+      setActiveDraft(null)
       refreshNamespace(selected)
     } catch (err: any) {
-      message.error(err?.response?.data?.error ?? '合并失败')
+      message.error(wikiErrorMessage(err, '合并失败'))
     }
   }
 
   const rejectDraft = async (draft: WikiDraft) => {
     if (!selected) return
-    await wikiApi.rejectDraft(selected.name, draft.id, { reason: '管理员拒绝' })
+    const reason = window.prompt('请输入拒绝原因', draft.reviewReason ?? '管理员拒绝')
+    if (reason === null) return
+    await wikiApi.rejectDraft(selected.name, draft.id, { reason })
     message.success('草稿已拒绝')
+    setDraftDetailOpen(false)
+    setActiveDraft(null)
     refreshNamespace(selected)
   }
 
   const renderHealthItems = () => {
     const items = health?.items ?? {}
+    const actionFor = (key: string) => {
+      if (key === 'mcpServer') return <Button size="small" onClick={() => navigate('/mcp-servers')}>配置 MCP</Button>
+      if (key === 'namespaces') return <Button size="small" onClick={() => setCreateOpen(true)}>新建知识库</Button>
+      if (key === 'contextBindings') return <Button size="small" onClick={() => selected ? openBind() : setWizardOpen(true)}>绑定上下文</Button>
+      if (key === 'botRuntime') return <Button size="small" onClick={() => navigate('/bots')}>查看机器人</Button>
+      if (key === 'wikiMcp') return <Button size="small" onClick={() => registerWikiMcp()}>启用 wiki-mcp</Button>
+      return null
+    }
     return (
       <Row gutter={[12, 12]}>
         {Object.entries(items).map(([key, value]: [string, any]) => (
           <Col key={key} xs={24} md={12} xl={8}>
             <Card size="small">
               <Space direction="vertical" size={2}>
-                <Text strong>{key}</Text>
-                <Tag color={healthColor(value.status)}>{value.status}</Tag>
-                <Text type="secondary" style={{ fontSize: 12 }}>{value.message}</Text>
+                <Text strong>{healthItemLabel(key)}</Text>
+                <Tag color={healthColor(value.status)}>{healthStatusLabel(value.status)}</Tag>
+                <Text type="secondary" style={{ fontSize: 12 }}>{formatHealthMessage(value.message)}</Text>
+                {value.status !== 'ok' && actionFor(key)}
               </Space>
             </Card>
           </Col>
@@ -534,7 +787,7 @@ export default function WikiPage() {
             <Space direction="vertical" style={{ width: '100%' }} size={12}>
               <Descriptions size="small" column={2}>
                 <Descriptions.Item label="路径">{selectedFile.path}</Descriptions.Item>
-                <Descriptions.Item label="大小">{selectedFile.size} bytes</Descriptions.Item>
+                <Descriptions.Item label="大小">{selectedFile.size} 字节</Descriptions.Item>
                 <Descriptions.Item label="最近修改">{formatTime(selectedFile.updatedAt)}</Descriptions.Item>
               </Descriptions>
               <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 16, maxHeight: 520, overflow: 'auto', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
@@ -550,9 +803,9 @@ export default function WikiPage() {
   )
 
   const bindingTab = (
-    <Card size="small" title="绑定到 Bot/Context" extra={<Button type="primary" icon={<LinkOutlined />} onClick={openBind}>新增绑定</Button>}>
+    <Card size="small" title="绑定到机器人/上下文" extra={<Button type="primary" icon={<LinkOutlined />} onClick={openBind}>新增绑定</Button>}>
       {bindings.length === 0 ? (
-        <Alert type="warning" showIcon message="此 namespace 尚未绑定任何 Context" />
+        <Alert type="warning" showIcon message="此知识库空间尚未绑定任何上下文" />
       ) : (
         <List
           dataSource={bindings}
@@ -560,7 +813,7 @@ export default function WikiPage() {
             <List.Item actions={[<Button key="unbind" size="small" danger onClick={() => handleUnbind(item)}>解绑</Button>]}>
               <List.Item.Meta
                 title={<Space>{item.botName}<Tag>{item.contextName}</Tag><Tag color="blue">{policyLabel(item.policy)}</Tag></Space>}
-                description={`MCP: ${item.mcpServerName}`}
+                description={`MCP 服务：${item.mcpServerName}`}
               />
             </List.Item>
           )}
@@ -578,12 +831,57 @@ export default function WikiPage() {
       </Row>
       <Card size="small" title="测试检索" extra={<Button icon={<ExperimentOutlined />} onClick={handleTestSearch}>测试</Button>}>
         <Input value={testQuery} onChange={(event) => setTestQuery(event.target.value)} placeholder="输入一个业务问题" style={{ marginBottom: 12 }} />
-        {testPreview ? (
+        {testPreview && (
           <Paragraph style={{ whiteSpace: 'pre-wrap', maxHeight: 260, overflow: 'auto', marginBottom: 0 }}>{testPreview}</Paragraph>
-        ) : testResults.length > 0 ? (
+        )}
+        {testResults.length > 0 ? (
           <List size="small" dataSource={testResults} renderItem={(item) => <List.Item><List.Item.Meta title={`${item.title} (${item.path})`} description={item.excerpt} /></List.Item>} />
-        ) : (
+        ) : testPreview ? null : (
           <Text type="secondary">自动搜索会展示命中摘要；固定页面策略会展示读取预览。</Text>
+        )}
+        {testPreview && testResults.length === 0 && !testPreview.includes('固定页面') && (
+          <Empty description="没有命中文档" style={{ marginTop: 12 }}>
+            <Space>
+              <Upload beforeUpload={handleUpload} showUploadList={false} multiple accept=".md">
+                <Button icon={<UploadOutlined />}>上传文档</Button>
+              </Upload>
+              <Button onClick={() => setActiveTab('drafts')}>创建草稿</Button>
+            </Space>
+          </Empty>
+        )}
+      </Card>
+      <Card size="small" title="最近检索日志">
+        {retrievalLogs.length === 0 ? <Empty description="暂无检索日志" /> : (
+          <List
+            size="small"
+            dataSource={retrievalLogs.slice(0, 8)}
+            renderItem={(item) => (
+              <List.Item>
+                <List.Item.Meta
+                  title={<Space><Tag>{policyLabel(item.policy)}</Tag><Text>{item.query}</Text><Tag color={item.hitCount > 0 ? 'green' : 'gold'}>{item.hitCount} 命中</Tag></Space>}
+                  description={<Space wrap><Text type="secondary">{formatTime(item.createdAt)}</Text><Text type="secondary">{formatDuration(item.durationMs)}</Text>{item.hitPaths.map((path) => <Tag key={path}>{path}</Tag>)}{item.error && <Tag color="red">{item.error}</Tag>}</Space>}
+                />
+              </List.Item>
+            )}
+          />
+        )}
+      </Card>
+      <Card size="small" title="无命中问题">
+        {misses.length === 0 ? (
+          <Empty description="暂无无命中问题" />
+        ) : (
+          <List
+            size="small"
+            dataSource={misses.slice(0, 8)}
+            renderItem={(item) => (
+              <List.Item actions={[<Button key="draft" size="small" onClick={() => createDraftFromMiss(item)}>转草稿</Button>]}>
+                <List.Item.Meta
+                  title={<Space><Text>{item.query}</Text><Tag color="gold">{item.count} 次</Tag></Space>}
+                  description={`最近出现：${formatTime(item.latestAt)}`}
+                />
+              </List.Item>
+            )}
+          />
         )}
       </Card>
       <Card size="small" title="全局健康状态">{renderHealthItems()}</Card>
@@ -604,6 +902,13 @@ export default function WikiPage() {
             <Form.Item name="sourceRef" label="来源引用">
               <Input placeholder="会话、任务或备注" />
             </Form.Item>
+            <Form.Item name="mergeStrategy" label="默认合并策略" initialValue="append">
+              <Select options={[
+                { label: '追加到页面', value: 'append' },
+                { label: '覆盖页面', value: 'replace' },
+                { label: '仅创建新页面', value: 'createOnly' },
+              ]} />
+            </Form.Item>
             <Button type="primary" htmlType="submit">保存草稿</Button>
           </Form>
         </Card>
@@ -616,15 +921,17 @@ export default function WikiPage() {
               renderItem={(draft) => (
                 <List.Item
                   actions={draft.status === 'pending' ? [
+                    <Button key="detail" size="small" onClick={() => openDraftDetail(draft)}>详情</Button>,
                     <Button key="approve" size="small" type="primary" onClick={() => approveDraft(draft)}>合并</Button>,
                     <Button key="reject" size="small" danger onClick={() => rejectDraft(draft)}>拒绝</Button>,
-                  ] : [<Tag key="status">{draft.status}</Tag>]}
+                  ] : [<Tag key="status">{statusLabel(draft.status)}</Tag>]}
                 >
                   <List.Item.Meta
-                    title={<Space>{draft.targetPath}<Tag color={draft.status === 'pending' ? 'gold' : draft.status === 'merged' ? 'green' : 'red'}>{draft.status}</Tag></Space>}
+                    title={<Space>{draft.targetPath}<Tag color={draft.status === 'pending' ? 'gold' : draft.status === 'merged' ? 'green' : 'red'}>{statusLabel(draft.status)}</Tag><Tag>{strategyLabel(draft.mergeStrategy)}</Tag></Space>}
                     description={
                       <Space direction="vertical" style={{ width: '100%' }}>
-                        <Text type="secondary">来源：{draft.sourceType}{draft.sourceRef ? ` / ${draft.sourceRef}` : ''}</Text>
+                        <Text type="secondary">来源：{sourceTypeLabel(draft.sourceType)}{draft.sourceRef ? ` / ${draft.sourceRef}` : ''}</Text>
+                        {draft.reviewReason && <Text type="secondary">原因：{draft.reviewReason}</Text>}
                         <Paragraph ellipsis={{ rows: 4, expandable: true }}>{draft.content}</Paragraph>
                       </Space>
                     }
@@ -638,6 +945,60 @@ export default function WikiPage() {
     </Row>
   )
 
+  const opsTab = (
+    <Space direction="vertical" style={{ width: '100%' }} size={16}>
+      <Row gutter={16}>
+        <Col xs={24} md={6}><Card><Statistic title="文档数" value={metrics?.fileCount ?? namespaceHealth?.fileCount ?? countFiles(fileTree)} /></Card></Col>
+        <Col xs={24} md={6}><Card><Statistic title="绑定数" value={metrics?.bindingCount ?? bindings.length} /></Card></Col>
+        <Col xs={24} md={6}><Card><Statistic title="待审核草稿" value={metrics?.pendingDraftCount ?? drafts.filter((draft) => draft.status === 'pending').length} /></Card></Col>
+        <Col xs={24} md={6}><Card><Statistic title="7天无命中" value={metrics?.missCount ?? 0} /></Card></Col>
+      </Row>
+      <Row gutter={16}>
+        <Col xs={24} md={12}>
+          <Card size="small" title="热门命中文档">
+            {!metrics?.hotDocuments?.length ? <Empty description="暂无命中文档" /> : (
+              <List
+                size="small"
+                dataSource={metrics.hotDocuments}
+                renderItem={(item) => <List.Item><List.Item.Meta title={item.path} description={`${item.hitCount} 次命中`} /></List.Item>}
+              />
+            )}
+          </Card>
+        </Col>
+        <Col xs={24} md={12}>
+          <Card size="small" title="热门无命中问题">
+            {!metrics?.topMisses?.length ? (
+              <Empty description="暂无无命中问题">
+                <Space>
+                  <Button onClick={() => setActiveTab('health')}>测试检索</Button>
+                  <Button onClick={() => setActiveTab('drafts')}>创建草稿</Button>
+                </Space>
+              </Empty>
+            ) : (
+              <List
+                size="small"
+                dataSource={metrics.topMisses}
+                renderItem={(item) => (
+                  <List.Item actions={[<Button key="draft" size="small" onClick={() => createDraftFromMiss(item)}>转草稿</Button>]}>
+                    <List.Item.Meta title={item.query} description={`${item.count} 次，最近 ${formatTime(item.latestAt)}`} />
+                  </List.Item>
+                )}
+              />
+            )}
+          </Card>
+        </Col>
+      </Row>
+      <Card size="small" title="运营摘要">
+        <Descriptions size="small" column={2}>
+          <Descriptions.Item label="最近修改">{formatTime(metrics?.latestModifiedAt)}</Descriptions.Item>
+          <Descriptions.Item label="近 7 天检索">{metrics?.retrievalCount ?? 0}</Descriptions.Item>
+          <Descriptions.Item label="待审核草稿">{metrics?.pendingDraftCount ?? 0}</Descriptions.Item>
+          <Descriptions.Item label="无命中">{metrics?.missCount ?? 0}</Descriptions.Item>
+        </Descriptions>
+      </Card>
+    </Space>
+  )
+
   return (
     <div style={{ padding: 24 }}>
       <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
@@ -645,7 +1006,7 @@ export default function WikiPage() {
         <Space>
           <Button icon={<CloudSyncOutlined />} onClick={handleGitPull}>同步最新</Button>
           <Button icon={<CheckCircleOutlined />} onClick={() => setWizardOpen(true)}>使用向导</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建 Namespace</Button>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建知识库</Button>
         </Space>
       </Row>
 
@@ -655,14 +1016,18 @@ export default function WikiPage() {
           showIcon
           style={{ marginBottom: 16 }}
           message="Wiki 尚未完成完整配置"
-          description="按向导完成 namespace、wiki-mcp、Context 绑定和测试检索后，Bot 才能稳定使用知识库。"
+          description="按向导完成知识库空间、wiki-mcp、上下文绑定和测试检索后，机器人才能稳定使用知识库。"
           action={<Button size="small" onClick={() => setWizardOpen(true)}>开始向导</Button>}
         />
       )}
 
+      <Card size="small" title="配置体检中心" style={{ marginBottom: 16 }}>
+        {renderHealthItems()}
+      </Card>
+
       <Row gutter={16}>
         <Col xs={24} xl={7}>
-          <Card title="Namespace" loading={loading}>
+          <Card title="知识库空间" loading={loading}>
             <Space direction="vertical" style={{ width: '100%' }}>
               {namespaces.map((ns) => (
                 <Card
@@ -678,12 +1043,25 @@ export default function WikiPage() {
                   }
                 >
                   <Card.Meta
-                    title={<Space>{ns.displayName}<Tag>{ns.name}</Tag></Space>}
-                    description={<Space direction="vertical" size={2}><Text type="secondary">{ns.path}</Text>{ns.description && <Text type="secondary">{ns.description}</Text>}</Space>}
+                    title={
+                      <Space wrap>
+                        {ns.displayName}
+                        <Tag>{ns.name}</Tag>
+                        {(namespaceSummaries[ns.name]?.pendingDraftCount ?? 0) > 0 && <Tag color="gold">待审 {namespaceSummaries[ns.name].pendingDraftCount}</Tag>}
+                        {(namespaceSummaries[ns.name]?.bindingCount ?? 0) === 0 && <Tag color="red">未绑定</Tag>}
+                      </Space>
+                    }
+                    description={
+                      <Space direction="vertical" size={2}>
+                        <Text type="secondary">{ns.path}</Text>
+                        <Text type="secondary">文档 {namespaceSummaries[ns.name]?.fileCount ?? 0} / 绑定 {namespaceSummaries[ns.name]?.bindingCount ?? 0} / 无命中 {namespaceSummaries[ns.name]?.recentMissCount ?? 0}</Text>
+                        {ns.description && <Text type="secondary">{ns.description}</Text>}
+                      </Space>
+                    }
                   />
                 </Card>
               ))}
-              {namespaces.length === 0 && <Empty description="暂无 Namespace" />}
+              {namespaces.length === 0 && <Empty description="暂无知识库空间" />}
             </Space>
           </Card>
         </Col>
@@ -694,7 +1072,7 @@ export default function WikiPage() {
               <Card>
                 <Row gutter={16}>
                   <Col xs={24} md={8}><Statistic title="文档数" value={namespaceHealth?.fileCount ?? countFiles(fileTree)} /></Col>
-                  <Col xs={24} md={8}><Statistic title="绑定 Context" value={bindings.length} /></Col>
+                  <Col xs={24} md={8}><Statistic title="绑定上下文" value={bindings.length} /></Col>
                   <Col xs={24} md={8}><Statistic title="最近修改" value={formatTime(namespaceHealth?.latestModifiedAt)} /></Col>
                 </Row>
               </Card>
@@ -706,16 +1084,17 @@ export default function WikiPage() {
                   { key: 'bindings', label: '绑定', children: bindingTab },
                   { key: 'health', label: '健康状态', children: healthTab },
                   { key: 'drafts', label: '知识草稿', children: draftsTab },
+                  { key: 'ops', label: '运营', children: opsTab },
                 ]}
               />
             </Space>
           ) : (
-            <Card><Empty description="选择一个 Namespace 查看详情" /></Card>
+            <Card><Empty description="选择一个知识库空间查看详情" /></Card>
           )}
         </Col>
       </Row>
 
-      <Modal title="新建 Namespace" open={createOpen} onCancel={() => { setCreateOpen(false); createForm.resetFields() }} onOk={() => createForm.submit()} okText="创建">
+      <Modal title="新建知识库空间" open={createOpen} onCancel={() => { setCreateOpen(false); createForm.resetFields() }} onOk={() => createForm.submit()} okText="创建">
         <Form form={createForm} layout="vertical" onFinish={handleCreate}>
           <Form.Item name="name" label="标识符" rules={[{ required: true }, { pattern: /^[a-z0-9-]+$/, message: '只允许小写字母、数字和短横线' }]}>
             <Input placeholder="product-kb" />
@@ -732,15 +1111,15 @@ export default function WikiPage() {
         </Form>
       </Modal>
 
-      <Modal title="绑定到 Bot/Context" open={bindOpen} onCancel={() => setBindOpen(false)} onOk={() => bindForm.submit()} okText="保存绑定">
+      <Modal title="绑定到机器人/上下文" open={bindOpen} onCancel={() => setBindOpen(false)} onOk={() => bindForm.submit()} okText="保存绑定">
         <Form form={bindForm} layout="vertical" onFinish={handleBind}>
-          <Form.Item name="botId" label="Bot" rules={[{ required: true }]}>
+          <Form.Item name="botId" label="机器人" rules={[{ required: true }]}>
             <Select options={bots.map((bot) => ({ label: bot.name, value: bot.id }))} onChange={handleBindBotChange} />
           </Form.Item>
-          <Form.Item name="contextId" label="Context" rules={[{ required: true }]}>
+          <Form.Item name="contextId" label="上下文" rules={[{ required: true }]}>
             <Select options={bindContexts.map((ctx) => ({ label: ctx.name, value: ctx.id }))} />
           </Form.Item>
-          <Form.Item name="mcpServerId" label="Wiki MCP Server" rules={[{ required: true }]}>
+          <Form.Item name="mcpServerId" label="Wiki MCP 服务" rules={[{ required: true }]}>
             <Select options={mcpServers.filter((server) => server.enabled && isWikiMcpServer(server)).map((server) => ({ label: server.name, value: server.id }))} />
           </Form.Item>
           <Form.Item name="policy" label="检索策略" rules={[{ required: true }]}>
@@ -751,7 +1130,7 @@ export default function WikiPage() {
             </Radio.Group>
           </Form.Item>
           <Form.Item name="forceCallPage" label="固定页面路径">
-            <Input placeholder="rules/sop.md" />
+            <Input placeholder="制度/服务规范.md" />
           </Form.Item>
           <Form.Item name="maxChars" label="最大注入字符数" initialValue={6000}>
             <InputNumber min={500} max={50000} />
@@ -762,14 +1141,14 @@ export default function WikiPage() {
       <Modal title="Wiki 使用向导" open={wizardOpen} width={760} onCancel={() => setWizardOpen(false)} onOk={runWizardPrimary} okText={wizardStep === 3 ? '完成' : '下一步'}>
         <Steps current={wizardStep} items={[
           { title: '创建知识库' },
-          { title: '注册 MCP' },
-          { title: '绑定 Context' },
+          { title: '注册 MCP 服务' },
+          { title: '绑定上下文' },
           { title: '测试检索' },
         ]} style={{ marginBottom: 24 }} />
         <Form form={wizardForm} layout="vertical">
           {wizardStep === 0 && (
             <>
-              <Form.Item name="name" label="Namespace 标识符" rules={[{ required: true }, { pattern: /^[a-z0-9-]+$/ }]}>
+              <Form.Item name="name" label="知识库标识符" rules={[{ required: true }, { pattern: /^[a-z0-9-]+$/ }]}>
                 <Input placeholder="product-kb" />
               </Form.Item>
               <Form.Item name="display_name" label="展示名称" rules={[{ required: true }]}>
@@ -792,10 +1171,10 @@ export default function WikiPage() {
           )}
           {wizardStep === 2 && (
             <>
-              <Form.Item name="botId" label="Bot" rules={[{ required: true }]}>
+              <Form.Item name="botId" label="机器人" rules={[{ required: true }]}>
                 <Select options={bots.map((bot) => ({ label: bot.name, value: bot.id }))} onChange={handleBindBotChange} />
               </Form.Item>
-              <Form.Item name="contextId" label="Context" rules={[{ required: true }]}>
+              <Form.Item name="contextId" label="上下文" rules={[{ required: true }]}>
                 <Select options={bindContexts.map((ctx) => ({ label: ctx.name, value: ctx.id }))} />
               </Form.Item>
               <Form.Item name="policy" label="检索策略" initialValue="autoSearch">
@@ -805,7 +1184,7 @@ export default function WikiPage() {
                   <Radio.Button value="fixedPage">固定页面</Radio.Button>
                 </Radio.Group>
               </Form.Item>
-              <Form.Item name="forceCallPage" label="固定页面路径"><Input placeholder="rules/sop.md" /></Form.Item>
+              <Form.Item name="forceCallPage" label="固定页面路径"><Input placeholder="制度/服务规范.md" /></Form.Item>
               <Form.Item name="maxChars" label="最大注入字符数" initialValue={6000}><InputNumber min={500} max={50000} /></Form.Item>
             </>
           )}
@@ -820,6 +1199,69 @@ export default function WikiPage() {
         </Form>
         <Divider />
         <Text type="secondary">当前 Wiki 根目录：{health?.wikiRoot || '未配置'}</Text>
+      </Modal>
+
+      <Modal
+        title="草稿详情"
+        open={draftDetailOpen}
+        width={920}
+        onCancel={() => { setDraftDetailOpen(false); setActiveDraft(null); setActiveDraftDiff(null) }}
+        footer={[
+          <Button key="save" onClick={saveDraftDetail}>保存</Button>,
+          <Button key="reject" danger disabled={!activeDraft || activeDraft.status !== 'pending'} onClick={() => activeDraft && rejectDraft(activeDraft)}>拒绝</Button>,
+          <Button key="approve" type="primary" disabled={!activeDraft || activeDraft.status !== 'pending' || Boolean(activeDraftDiff?.error)} onClick={() => activeDraft && approveDraft(activeDraft)}>按当前策略合并</Button>,
+        ]}
+      >
+        {activeDraft && (
+          <Row gutter={16}>
+            <Col xs={24} xl={10}>
+              <Form form={draftEditForm} layout="vertical">
+                <Form.Item name="targetPath" label="目标页面" rules={[{ required: true }]}>
+                  <Input />
+                </Form.Item>
+                <Form.Item name="mergeStrategy" label="合并策略" rules={[{ required: true }]}>
+                  <Select
+                    onChange={(value) => {
+                      setActiveDraftStrategy(value)
+                      loadDraftDiff(activeDraft, value)
+                    }}
+                    options={[
+                      { label: '追加到页面', value: 'append' },
+                      { label: '覆盖页面', value: 'replace' },
+                      { label: '仅创建新页面', value: 'createOnly' },
+                    ]}
+                  />
+                </Form.Item>
+                <Form.Item name="sourceRef" label="来源引用">
+                  <Input />
+                </Form.Item>
+                <Form.Item name="content" label="Markdown 内容" rules={[{ required: true }]}>
+                  <Input.TextArea rows={14} />
+                </Form.Item>
+              </Form>
+              <Descriptions size="small" column={1}>
+                <Descriptions.Item label="来源">{sourceTypeLabel(activeDraft.sourceType)}{activeDraft.sourceRef ? ` / ${activeDraft.sourceRef}` : ''}</Descriptions.Item>
+                <Descriptions.Item label="状态">{statusLabel(activeDraft.status)}</Descriptions.Item>
+                <Descriptions.Item label="创建时间">{formatTime(activeDraft.createdAt)}</Descriptions.Item>
+              </Descriptions>
+            </Col>
+            <Col xs={24} xl={14}>
+              <Space direction="vertical" style={{ width: '100%' }} size={12}>
+                {activeDraftDiff?.error && <Alert type="error" showIcon message={wikiErrorText(activeDraftDiff.error, '差异预览失败')} />}
+                <Card size="small" title={`差异预览：${strategyLabel(activeDraftStrategy)}`}>
+                  <Paragraph style={{ whiteSpace: 'pre-wrap', maxHeight: 300, overflow: 'auto', marginBottom: 0 }}>
+                    {(activeDraftDiff?.diff ?? []).join('\n')}
+                  </Paragraph>
+                </Card>
+                <Card size="small" title="合并后预览">
+                  <Paragraph style={{ whiteSpace: 'pre-wrap', maxHeight: 260, overflow: 'auto', marginBottom: 0 }}>
+                    {activeDraftDiff?.nextContent ?? activeDraft.content}
+                  </Paragraph>
+                </Card>
+              </Space>
+            </Col>
+          </Row>
+        )}
       </Modal>
     </div>
   )

@@ -19,12 +19,14 @@ const [
   { BotRepository },
   { ContextRepository },
   { McpServerRepository },
+  { WikiRetrievalLogRepository },
   { wikiRouter },
 ] = await Promise.all([
   import('../db/client.js'),
   import('../db/bot-repository.js'),
   import('../db/context-repository.js'),
   import('../db/mcp-server-repository.js'),
+  import('../db/wiki-retrieval-log-repository.js'),
   import('./wiki.js'),
 ])
 
@@ -178,6 +180,44 @@ test('Wiki API searches, previews, checks health, binds contexts, and reviews dr
   assert.equal(health.response.status, 200)
   assert.equal(health.body.fileCount, 1)
   assert.equal(health.body.bindingCount, 1)
+  assert.equal(health.body.pendingDraftCount, 0)
+
+  await WikiRetrievalLogRepository.create({
+    botId: bot.id,
+    contextId: ctx.id,
+    chatKey: 'wecom:group:test',
+    namespace: 'product',
+    policy: 'autoSearch',
+    query: 'refund policy',
+    hitCount: 1,
+    hitPaths: ['faq/refund.md'],
+    durationMs: 12,
+  })
+  await WikiRetrievalLogRepository.create({
+    botId: bot.id,
+    contextId: ctx.id,
+    chatKey: 'wecom:group:test',
+    namespace: 'product',
+    policy: 'autoSearch',
+    query: 'missing answer',
+    hitCount: 0,
+    hitPaths: [],
+    durationMs: 9,
+  })
+
+  const logs = await requestJson('/api/wiki/product/retrieval-logs')
+  assert.equal(logs.response.status, 200)
+  assert.equal(logs.body.logs.length >= 2, true)
+
+  const misses = await requestJson('/api/wiki/product/misses')
+  assert.equal(misses.response.status, 200)
+  assert.equal(misses.body.misses.some((item: any) => item.query === 'missing answer' && item.count === 1), true)
+
+  const metrics = await requestJson('/api/wiki/product/metrics')
+  assert.equal(metrics.response.status, 200)
+  assert.equal(metrics.body.retrievalCount >= 2, true)
+  assert.equal(metrics.body.missCount >= 1, true)
+  assert.equal(metrics.body.hotDocuments.some((item: any) => item.path === 'faq/refund.md'), true)
 
   const draft = await requestJson('/api/wiki/product/drafts', {
     method: 'POST',
@@ -190,12 +230,45 @@ test('Wiki API searches, previews, checks health, binds contexts, and reviews dr
   })
   assert.equal(draft.response.status, 201)
   assert.equal(draft.body.status, 'pending')
+  assert.equal(draft.body.mergeStrategy, 'append')
 
-  const approved = await requestJson(`/api/wiki/product/drafts/${draft.body.id}/approve`, { method: 'POST', body: JSON.stringify({ reviewedBy: 'tester' }) })
+  const edited = await requestJson(`/api/wiki/product/drafts/${draft.body.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      targetPath: 'faq/new-answer.md',
+      content: '## New answer\n\nAn edited reviewed answer.',
+      mergeStrategy: 'replace',
+    }),
+  })
+  assert.equal(edited.response.status, 200)
+  assert.equal(edited.body.mergeStrategy, 'replace')
+  assert.match(edited.body.content, /edited/)
+
+  const diff = await requestJson(`/api/wiki/product/drafts/${draft.body.id}/diff?strategy=replace`)
+  assert.equal(diff.response.status, 200)
+  assert.equal(diff.body.targetExists, false)
+  assert.equal(diff.body.strategy, 'replace')
+
+  const approved = await requestJson(`/api/wiki/product/drafts/${draft.body.id}/approve`, { method: 'POST', body: JSON.stringify({ reviewedBy: 'tester', mergeStrategy: 'replace' }) })
   assert.equal(approved.response.status, 200)
   assert.equal(approved.body.status, 'merged')
 
   const approvedFile = await requestJson('/api/wiki/product/files/faq/new-answer.md')
   assert.equal(approvedFile.response.status, 200)
-  assert.match(approvedFile.body.content, /A reviewed answer/)
+  assert.match(approvedFile.body.content, /edited reviewed answer/)
+
+  const createOnlyDraft = await requestJson('/api/wiki/product/drafts', {
+    method: 'POST',
+    body: JSON.stringify({
+      targetPath: 'faq/new-answer.md',
+      content: 'Should not overwrite',
+      sourceType: 'test',
+      mergeStrategy: 'createOnly',
+    }),
+  })
+  const rejectedCreateOnly = await requestJson(`/api/wiki/product/drafts/${createOnlyDraft.body.id}/approve`, {
+    method: 'POST',
+    body: JSON.stringify({ mergeStrategy: 'createOnly' }),
+  })
+  assert.equal(rejectedCreateOnly.response.status, 409)
 })

@@ -71,6 +71,9 @@ export const wikiApi = {
   deleteNamespace: (id: string) => api.delete(`/wiki/namespaces/${id}`),
   health: () => api.get('/wiki/health').then((r) => r.data),
   namespaceHealth: (namespace: string) => api.get(`/wiki/${namespace}/health`).then((r) => r.data),
+  metrics: (namespace: string) => api.get(`/wiki/${namespace}/metrics`).then((r) => r.data),
+  retrievalLogs: (namespace: string) => api.get(`/wiki/${namespace}/retrieval-logs`).then((r) => r.data),
+  misses: (namespace: string) => api.get(`/wiki/${namespace}/misses`).then((r) => r.data),
   search: (namespace: string, query: string) =>
     api.get(`/wiki/${namespace}/search`, { params: { q: query } }).then((r) => r.data),
   bindings: (namespace: string) => api.get(`/wiki/${namespace}/bindings`).then((r) => r.data),
@@ -87,6 +90,10 @@ export const wikiApi = {
     api.delete(`/wiki/${namespace}/files/${encodeURI(filePath)}`).then((r) => r.data),
   listDrafts: (namespace: string) => api.get(`/wiki/${namespace}/drafts`).then((r) => r.data),
   createDraft: (namespace: string, data: unknown) => api.post(`/wiki/${namespace}/drafts`, data).then((r) => r.data),
+  updateDraft: (namespace: string, id: string, data: unknown) =>
+    api.put(`/wiki/${namespace}/drafts/${id}`, data).then((r) => r.data),
+  draftDiff: (namespace: string, id: string, strategy?: string) =>
+    api.get(`/wiki/${namespace}/drafts/${id}/diff`, { params: strategy ? { strategy } : {} }).then((r) => r.data),
   approveDraft: (namespace: string, id: string, data: unknown = {}) =>
     api.post(`/wiki/${namespace}/drafts/${id}/approve`, data).then((r) => r.data),
   rejectDraft: (namespace: string, id: string, data: unknown = {}) =>
