@@ -11,6 +11,7 @@ import { McpServerRepository } from '../db/mcp-server-repository.js'
 import { WikiDraftRepository } from '../db/wiki-draft-repository.js'
 import { WikiNamespaceRepository, type WikiNamespace } from '../db/wiki-namespace-repository.js'
 import { WikiRetrievalLogRepository } from '../db/wiki-retrieval-log-repository.js'
+import { botManager } from '../bot-manager/bot-manager.js'
 
 export const wikiRouter: Router = Router()
 
@@ -334,7 +335,7 @@ async function getGlobalHealth() {
     ? healthItem('unknown', 'No Wiki-bound Bot to check')
     : runningBoundBots.length > 0
       ? healthItem('ok', `${runningBoundBots.length}/${boundBots.length} Wiki-bound Bot(s) running`)
-      : healthItem('warning', 'Wiki-bound Bot(s) are not running or may need restart')
+      : healthItem('warning', 'Wiki-bound Bot(s) are not running')
 
   return {
     wikiRoot: WIKI_ROOT,
@@ -587,6 +588,7 @@ wikiRouter.post('/:namespace/bindings', async (req, res) => {
     ? context.mcpConfigs.map((cfg) => cfg.mcpServerId === mcpServer.id ? nextConfig : cfg)
     : [...(context.mcpConfigs ?? []), nextConfig]
   const updated = await ContextRepository.update(context.id, { mcpConfigs })
+  if (updated) await botManager.refreshContexts(context.botId)
   res.status(201).json(updated)
 })
 
@@ -604,6 +606,7 @@ wikiRouter.put('/:namespace/bindings/:contextId/policy', async (req, res) => {
   const updated = await ContextRepository.update(context.id, {
     mcpConfigs: context.mcpConfigs.map((cfg) => cfg === target ? next : cfg),
   })
+  if (updated) await botManager.refreshContexts(context.botId)
   res.json(updated)
 })
 
@@ -626,7 +629,8 @@ wikiRouter.delete('/:namespace/bindings/:contextId', async (req, res) => {
     params.namespace = Array.isArray(cfg.params?.namespace) ? namespaces : namespaces[0]
     return { ...cfg, params }
   })
-  await ContextRepository.update(context.id, { mcpConfigs })
+  const updated = await ContextRepository.update(context.id, { mcpConfigs })
+  if (updated) await botManager.refreshContexts(context.botId)
   res.status(204).send()
 })
 

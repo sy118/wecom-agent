@@ -8,6 +8,25 @@ export const botsRouter: Router = Router()
 // SSE clients registry
 const sseClients = new Set<Response>()
 
+const RUNTIME_RESTART_FIELDS = new Set([
+  'wecomBotId',
+  'wecomBotSecret',
+  'wecomWsUrl',
+  'llmApiKey',
+  'llmBaseUrl',
+  'llmModel',
+  'provider',
+  'streamingMode',
+  'difyBaseUrl',
+  'difyApiKey',
+  'difyAppId',
+  'visionEnabled',
+])
+
+function hasRuntimeRestartChange(before: Record<string, unknown>, patch: Record<string, unknown>): boolean {
+  return Object.keys(patch).some((key) => RUNTIME_RESTART_FIELDS.has(key) && patch[key] !== before[key])
+}
+
 // Forward BotManager status events to all SSE clients
 botManager.on('status', (event: BotStatusEvent) => {
   const data = `data: ${JSON.stringify(event)}\n\n`
@@ -54,8 +73,18 @@ botsRouter.get('/:id', async (req, res) => {
 
 // PUT /api/bots/:id
 botsRouter.put('/:id', async (req, res) => {
+  const before = await BotRepository.findById(req.params.id)
+  if (!before) { res.status(404).json({ error: 'Bot not found' }); return }
   const bot = await BotRepository.update(req.params.id, req.body)
   if (!bot) { res.status(404).json({ error: 'Bot not found' }); return }
+  if (botManager.isRunning(req.params.id) && hasRuntimeRestartChange(before as unknown as Record<string, unknown>, req.body)) {
+    try {
+      await botManager.restart(req.params.id)
+    } catch (err) {
+      res.status(500).json({ error: `Bot updated but runtime restart failed: ${err instanceof Error ? err.message : String(err)}` })
+      return
+    }
+  }
   res.json(bot)
 })
 

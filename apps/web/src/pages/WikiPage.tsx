@@ -196,7 +196,7 @@ function formatHealthMessage(message?: string) {
     'No Wiki namespace configured': '尚未创建 Wiki 知识库空间',
     'No Context is bound to Wiki': '尚未将上下文绑定到 Wiki',
     'No Wiki-bound Bot to check': '暂无绑定 Wiki 的机器人可检测',
-    'Wiki-bound Bot(s) are not running or may need restart': '绑定 Wiki 的机器人未运行，或需要重启',
+    'Wiki-bound Bot(s) are not running': '绑定 Wiki 的机器人未运行',
   }
   if (exact[message]) return exact[message]
   const remoteMatch = message.match(/^(\d+) remote\(s\) configured$/)
@@ -338,7 +338,7 @@ export default function WikiPage() {
   const shouldShowWizard = namespaces.length === 0 || !wikiMcp || allBindingCount === 0
 
   const remindBotRestart = () => {
-    message.info('Wiki MCP 或绑定配置已变化，关联机器人需要重启后才会重新加载工具')
+    message.info('配置已保存，运行中的关联机器人会自动加载最新 Wiki 工具')
   }
 
   const refreshAll = async () => {

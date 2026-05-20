@@ -184,6 +184,45 @@ export class BotInstance {
     }
   }
 
+  reloadContexts(contexts: ContextConfig[]): void {
+    this.deps.contexts = contexts
+    this.contextMap = new Map(contexts.map((context) => [context.id, context]))
+    this.defaultContext = contexts.find((context) => context.isDefault) ?? null
+    console.log(`[BotInstance:${this.deps.bot.id}] Reloaded ${contexts.length} context(s)`)
+  }
+
+  reloadBindings(bindings: Binding[]): void {
+    this.deps.bindings = bindings
+    this.bindingMap = new Map(bindings.map((binding) => [binding.chatKey, binding.contextId]))
+    for (const binding of bindings) {
+      this.discoveredChats.delete(binding.chatKey)
+    }
+    console.log(`[BotInstance:${this.deps.bot.id}] Reloaded ${bindings.length} binding(s)`)
+  }
+
+  async reloadMcpServers(mcpServers: McpServerConfig[]): Promise<void> {
+    this.deps.mcpServers = mcpServers
+    this.toolPool.clear()
+    if (this.deps.bot.provider === 'dify') return
+
+    for (const server of mcpServers) {
+      if (!server.enabled) continue
+      try {
+        const tools = await createMcpTools([server])
+        this.toolPool.set(server.id, tools)
+      } catch (err) {
+        console.error(`[BotInstance:${this.deps.bot.id}] Failed to reload tools from ${server.name}:`, err)
+      }
+    }
+    console.log(`[BotInstance:${this.deps.bot.id}] Reloaded ${this.toolPool.size} MCP server tool pool(s)`)
+  }
+
+  reloadSkills(skills: SkillDefinition[]): void {
+    this.deps.skills = skills
+    this.skillToolPool = new Map(skills.filter((skill) => skill.enabled).map((skill) => [skill.id, skill]))
+    console.log(`[BotInstance:${this.deps.bot.id}] Reloaded ${this.skillToolPool.size} enabled skill(s)`)
+  }
+
   async invokeForScheduledTask(prompt: string, systemPrompt: string, targetChatId: string): Promise<string> {
     if (this.deps.bot.provider === 'dify') {
       const scheduledUser = `wecom:scheduled:${targetChatId}`

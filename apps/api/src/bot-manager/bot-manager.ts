@@ -6,7 +6,7 @@ import { BindingRepository } from '../db/binding-repository.js'
 import { McpServerRepository } from '../db/mcp-server-repository.js'
 import { SkillRepository } from '../db/skill-repository.js'
 import { db } from '../db/client.js'
-import type { BotStatus, BotStatusEvent } from '@wecom-platform/types'
+import type { BotStatus, BotStatusEvent, ContextConfig } from '@wecom-platform/types'
 
 export class BotManager extends EventEmitter {
   private instances = new Map<string, BotInstance>()
@@ -48,6 +48,16 @@ export class BotManager extends EventEmitter {
     this.emitStatus(botId, 'stopped')
   }
 
+  async restart(botId: string): Promise<void> {
+    if (!this.instances.has(botId)) return
+    await this.stop(botId)
+    await this.start(botId)
+  }
+
+  isRunning(botId: string): boolean {
+    return this.instances.has(botId)
+  }
+
   getStatus(botId: string): BotStatus {
     return this.instances.has(botId) ? 'running' : 'stopped'
   }
@@ -78,8 +88,38 @@ export class BotManager extends EventEmitter {
     this.instances.get(botId)?.addBinding(chatKey, contextId)
   }
 
-  upsertContext(botId: string, context: import('@wecom-platform/types').ContextConfig): void {
+  upsertContext(botId: string, context: ContextConfig): void {
     this.instances.get(botId)?.upsertContext(context)
+  }
+
+  async refreshContexts(botId: string): Promise<void> {
+    const instance = this.instances.get(botId)
+    if (!instance) return
+    instance.reloadContexts(await ContextRepository.findByBotId(botId))
+  }
+
+  async refreshBindings(botId: string): Promise<void> {
+    const instance = this.instances.get(botId)
+    if (!instance) return
+    instance.reloadBindings(await BindingRepository.findByBotId(botId))
+  }
+
+  async refreshMcpServers(botId?: string): Promise<void> {
+    const mcpServers = await McpServerRepository.findAll()
+    const targets = botId
+      ? [...this.instances].filter(([id]) => id === botId)
+      : [...this.instances]
+    await Promise.all(targets.map(([, instance]) => instance.reloadMcpServers(mcpServers)))
+  }
+
+  async refreshSkills(botId?: string): Promise<void> {
+    const skills = await SkillRepository.findAll()
+    const targets = botId
+      ? [...this.instances].filter(([id]) => id === botId)
+      : [...this.instances]
+    for (const [, instance] of targets) {
+      instance.reloadSkills(skills)
+    }
   }
 
   async invokeForTask(botId: string, prompt: string, systemPrompt: string, targetChatId: string): Promise<string> {

@@ -67,7 +67,7 @@ contextsRouter.post('/', async (req, res) => {
   const err = await validateContextConfigs(data.mcpConfigs, data.skillConfigs)
   if (err) { res.status(400).json({ error: err }); return }
   const created = await ContextRepository.create(data)
-  botManager.upsertContext(botId, created)
+  await botManager.refreshContexts(botId)
   res.status(201).json(await maskContextResponse(created))
 })
 
@@ -90,11 +90,13 @@ contextsRouter.put('/:id', async (req, res) => {
   }
   const ctx = await ContextRepository.update(params.id, req.body)
   if (!ctx) { res.status(404).json({ error: 'Context not found' }); return }
-  botManager.upsertContext(params.botId, ctx)
+  await botManager.refreshContexts(params.botId)
   res.json(await maskContextResponse(ctx))
 })
 
 contextsRouter.delete('/:id', async (req, res) => {
+  const { botId } = req.params as { botId: string; id: string }
   await ContextRepository.delete(req.params.id)
+  await botManager.refreshContexts(botId)
   res.status(204).send()
 })
