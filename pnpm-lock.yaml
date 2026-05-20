@@ -47,7 +47,7 @@ importers:
         specifier: ^3.27.0
         version: 3.36.0
       zod:
-        specifier: ^3.23.8
+        specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
       '@types/cors':
@@ -161,7 +161,7 @@ importers:
         specifier: ^3.27.0
         version: 3.36.0
       zod:
-        specifier: ^3.23.8
+        specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
       '@types/express':
