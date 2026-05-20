@@ -156,12 +156,35 @@ export async function initDb(): Promise<void> {
       source_type TEXT NOT NULL DEFAULT 'manual',
       source_ref TEXT,
       status TEXT NOT NULL DEFAULT 'pending',
+      merge_strategy TEXT NOT NULL DEFAULT 'append',
       review_reason TEXT,
       reviewed_by TEXT,
       reviewed_at INTEGER,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS wiki_retrieval_logs (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT,
+      context_id TEXT,
+      chat_key TEXT,
+      namespace TEXT NOT NULL,
+      policy TEXT NOT NULL,
+      query TEXT NOT NULL,
+      hit_count INTEGER NOT NULL DEFAULT 0,
+      hit_paths TEXT NOT NULL DEFAULT '[]',
+      duration_ms INTEGER,
+      error TEXT,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_namespace_created
+      ON wiki_retrieval_logs(namespace, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_namespace_hit_count
+      ON wiki_retrieval_logs(namespace, hit_count);
+    CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_context
+      ON wiki_retrieval_logs(context_id);
 
     UPDATE bots SET status = 'stopped' WHERE status = 'running';
   `)
@@ -175,6 +198,7 @@ export async function initDb(): Promise<void> {
   await addColumnIfMissing('skills', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'")
   await addColumnIfMissing('skills', 'resource_index_json', "TEXT NOT NULL DEFAULT '{}'")
   await addColumnIfMissing('skills', 'permission_policy', "TEXT NOT NULL DEFAULT '{}'")
+  await addColumnIfMissing('wiki_knowledge_drafts', 'merge_strategy', "TEXT NOT NULL DEFAULT 'append'")
   await migrateAllowedProjects()
   await migrateScheduledTasksBotIdNullable()
   await migrateMcpServersBotIdNullable()

@@ -191,22 +191,22 @@ export default function ContextsPage() {
           type="info"
           showIcon
           message="Wiki 知识库配置"
-          description="常规场景只需要选择 namespace 和检索策略；高级参数会保留在 MCP params 中。"
+          description="常规场景只需要选择知识库空间和检索策略；高级参数会保留在 MCP 参数中。"
           style={{ marginBottom: 12 }}
         />
         {!server.enabled && (
           <Alert
             type="warning"
             showIcon
-            message="该 wiki-mcp 在全局 MCP 服务器中未启用，Bot 运行时不会加载它。"
+            message="该 wiki-mcp 在全局 MCP 服务器中未启用，机器人运行时不会加载它。"
             action={<Button size="small" onClick={() => navigate('/mcp-servers')}>去启用</Button>}
             style={{ marginBottom: 12 }}
           />
         )}
-        <Form.Item label="Namespace" style={{ marginBottom: 8 }}>
+        <Form.Item label="知识库空间" style={{ marginBottom: 8 }}>
           <Select
             value={cfg.params?.namespace}
-            placeholder="选择 Wiki namespace"
+            placeholder="选择 Wiki 知识库空间"
             options={wikiNamespaces.map((ns) => ({ label: `${ns.displayName} (${ns.name})`, value: ns.name }))}
             onChange={(value) => setMcpParam(server.id, 'namespace', value)}
           />
@@ -219,14 +219,14 @@ export default function ContextsPage() {
           </Radio.Group>
         </Form.Item>
         {policy === 'autoSearch' && (
-          <Form.Item label="跨 namespace 搜索" style={{ marginBottom: 8 }}>
+          <Form.Item label="跨知识库空间搜索" style={{ marginBottom: 8 }}>
             <Switch checked={Boolean(cfg.params?.crossNs)} onChange={(value) => setMcpParam(server.id, 'crossNs', value)} />
           </Form.Item>
         )}
         {policy === 'fixedPage' && (
           <>
             <Form.Item label="固定页面路径" style={{ marginBottom: 8 }}>
-              <Input value={cfg.params?.forceCallPage ?? ''} onChange={(event) => setMcpParam(server.id, 'forceCallPage', event.target.value)} placeholder="rules/sop.md" />
+              <Input value={cfg.params?.forceCallPage ?? ''} onChange={(event) => setMcpParam(server.id, 'forceCallPage', event.target.value)} placeholder="制度/服务规范.md" />
             </Form.Item>
             <Form.Item label="最大注入字符数" style={{ marginBottom: 8 }}>
               <InputNumber min={500} max={50000} value={cfg.params?.maxChars ?? 6000} onChange={(value) => setMcpParam(server.id, 'maxChars', value)} />
@@ -264,12 +264,12 @@ export default function ContextsPage() {
       },
     },
     {
-      title: 'Skills',
+      title: '技能包',
       dataIndex: 'skillConfigs',
       key: 'skillConfigs',
       render: (cfgs: SkillConfig[] = []) => {
         const enabled = cfgs.filter((cfg) => cfg.enabled)
-        if (enabled.length === 0) return <Tag>无 Skill</Tag>
+        if (enabled.length === 0) return <Tag>无技能包</Tag>
         return enabled.map((cfg) => {
           const skill = skills.find((item) => item.id === cfg.skillId)
           return <Tag key={cfg.skillId} color="purple">{skill?.name ?? cfg.skillId}</Tag>
@@ -319,7 +319,7 @@ export default function ContextsPage() {
 
           <Divider orientation="left" style={{ fontSize: 13 }}>MCP 能力配置</Divider>
           {bot?.provider === 'dify' ? (
-            <Alert type="info" message="该 Bot 使用 Dify 工作流，知识库检索和工具调用由 Dify 内部处理" showIcon style={{ marginBottom: 16 }} />
+            <Alert type="info" message="该机器人使用 Dify 工作流，知识库检索和工具调用由 Dify 内部处理" showIcon style={{ marginBottom: 16 }} />
           ) : mcpServers.length === 0 ? (
             <Alert type="info" message="尚未配置全局 MCP 服务器" description="请先在左侧「MCP 服务器」中添加全局 MCP 服务器，再配置上下文能力。" showIcon style={{ marginBottom: 16 }} />
           ) : (
@@ -332,7 +332,7 @@ export default function ContextsPage() {
                       <Switch size="small" checked={cfg.enabled} onChange={(value) => updateMcpConfig(server.id, (current) => ({ ...current, enabled: value }))} />
                       <span style={{ fontWeight: 500 }}>{server.name}</span>
                       <Tag style={{ fontSize: 11 }}>{server.transportType}</Tag>
-                      {cfg.enabled && cfg.params?.namespace && <Tag color="blue" style={{ fontSize: 11 }}>namespace: {cfg.params.namespace}</Tag>}
+                      {cfg.enabled && cfg.params?.namespace && <Tag color="blue" style={{ fontSize: 11 }}>知识库：{cfg.params.namespace}</Tag>}
                     </Space>
                   }
                 >
@@ -351,11 +351,11 @@ export default function ContextsPage() {
             })
           )}
 
-          <Divider orientation="left" style={{ fontSize: 13 }}>Skill 能力配置</Divider>
+          <Divider orientation="left" style={{ fontSize: 13 }}>技能包能力配置</Divider>
           {bot?.provider === 'dify' ? (
-            <Alert type="info" message="该 Bot 使用 Dify 工作流，本地 Skill 与 MCP 工具不会注入运行时" showIcon style={{ marginBottom: 16 }} />
+            <Alert type="info" message="该机器人使用 Dify 工作流，本地技能包与 MCP 工具不会注入运行时" showIcon style={{ marginBottom: 16 }} />
           ) : skills.length === 0 ? (
-            <Alert type="info" message="尚未安装全局 Skill" description="先到左侧「Skills」上传包含 SKILL.md 的文件夹，再回来为上下文启用。" action={<Button size="small" onClick={() => navigate('/skills')}>去上传</Button>} showIcon style={{ marginBottom: 16 }} />
+            <Alert type="info" message="尚未安装全局技能包" description="先到左侧「技能包」上传包含 SKILL.md 的文件夹，再回来为上下文启用。" action={<Button size="small" onClick={() => navigate('/skills')}>去上传</Button>} showIcon style={{ marginBottom: 16 }} />
           ) : (
             skills.map((skill) => {
               const cfg = getSkillConfig(skill.id)
@@ -373,7 +373,7 @@ export default function ContextsPage() {
                   <div style={{ color: '#666', marginBottom: cfg.enabled ? 12 : 0 }}>{skill.description}</div>
                   {cfg.enabled && (
                     <>
-                      <Form.Item label="强制加载 SKILL.md" style={{ marginBottom: 8 }} extra="开启后即使用户未显式提到该 Skill，也会把 SKILL.md 注入本次上下文">
+                      <Form.Item label="强制加载 SKILL.md" style={{ marginBottom: 8 }} extra="开启后即使用户未显式提到该技能包，也会把 SKILL.md 注入本次上下文">
                         <Switch checked={Boolean(cfg.forceUse)} onChange={(value) => updateSkillConfig(skill.id, (current) => ({ ...current, forceUse: value }))} />
                       </Form.Item>
                       <Form.Item label="参数 JSON" style={{ marginBottom: 0 }}>

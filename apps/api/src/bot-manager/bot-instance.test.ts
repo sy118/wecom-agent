@@ -12,9 +12,11 @@ process.env.DB_PATH = join(tempDir, 'bot-instance-test.db')
 const [
   botInstanceModule,
   { db, initDb },
+  { WikiRetrievalLogRepository },
 ] = await Promise.all([
   import('./bot-instance.js'),
   import('../db/client.js'),
+  import('../db/wiki-retrieval-log-repository.js'),
 ])
 
 const {
@@ -187,7 +189,7 @@ test('BotInstance force-calls Wiki autoSearch policy with namespace', async () =
         name: 'wiki_search',
         invoke: async (input: any) => {
           calls.push(input)
-          return 'matched refund.md'
+          return '[product] Refund (faq/refund.md)\nmatched refund.md'
         },
       },
     ])
@@ -204,6 +206,13 @@ test('BotInstance force-calls Wiki autoSearch policy with namespace', async () =
     assert.equal(calls.length, 1)
     assert.deepEqual(calls[0], { query: 'refund policy', namespace: 'product', cross_ns: false })
     assert.match(prompt, /matched refund\.md/)
+    const logs = await WikiRetrievalLogRepository.findByNamespace('product', { limit: 10 })
+    assert.equal(logs.some((log) =>
+      log.policy === 'autoSearch' &&
+      log.query === 'refund policy' &&
+      log.hitCount === 1 &&
+      log.hitPaths.includes('faq/refund.md')
+    ), true)
   } finally {
     ;(instance as any).sessions.destroy()
   }
@@ -234,7 +243,44 @@ test('BotInstance force-calls Wiki fixedPage policy with max chars', async () =>
     assert.equal(calls.length, 1)
     assert.deepEqual(calls[0], { path: 'rules/sop.md', namespace: 'product', max_chars: 1200 })
     assert.match(prompt, /# SOP/)
+    const logs = await WikiRetrievalLogRepository.findByNamespace('product', { limit: 10 })
+    assert.equal(logs.some((log) =>
+      log.policy === 'fixedPage' &&
+      log.query === 'rules/sop.md' &&
+      log.hitCount === 1 &&
+      log.hitPaths.includes('rules/sop.md')
+    ), true)
   } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance keeps reply flow when Wiki retrieval logging fails', async () => {
+  const instance = makeInstance()
+  const originalCreate = WikiRetrievalLogRepository.create
+  try {
+    ;(WikiRetrievalLogRepository as any).create = async () => {
+      throw new Error('log write failed')
+    }
+    ;(instance as any).toolPool.set('wiki-mcp', [
+      {
+        name: 'wiki_search',
+        invoke: async () => '[support] SOP (rules/sop.md)\nmatched sop.md',
+      },
+    ])
+
+    const prompt = await (instance as any).executeForceCallMcps('base prompt', [
+      {
+        mcpServerId: 'wiki-mcp',
+        enabled: true,
+        forceCall: true,
+        params: { namespace: 'support', retrievalPolicy: 'autoSearch' },
+      },
+    ], 'sop')
+
+    assert.match(prompt, /matched sop\.md/)
+  } finally {
+    ;(WikiRetrievalLogRepository as any).create = originalCreate
     ;(instance as any).sessions.destroy()
   }
 })

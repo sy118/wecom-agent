@@ -62,7 +62,7 @@ export default function AppLayout() {
             <Menu selectedKeys={[selectedKey]} items={[
               { key: 'bots', icon: <RobotOutlined />, label: '机器人管理', onClick: () => navigate('/bots') },
               { key: 'mcp-servers', icon: <ApiOutlined />, label: 'MCP 服务器', onClick: () => navigate('/mcp-servers') },
-              { key: 'skills', icon: <ThunderboltOutlined />, label: 'Skills', onClick: () => navigate('/skills') },
+              { key: 'skills', icon: <ThunderboltOutlined />, label: '技能包', onClick: () => navigate('/skills') },
               { key: 'scheduled-tasks', icon: <ScheduleOutlined />, label: '定时任务', onClick: () => navigate('/scheduled-tasks') },
               { key: 'wiki', icon: <BookOutlined />, label: 'Wiki 知识库', onClick: () => navigate('/wiki') },
               { type: 'divider' },

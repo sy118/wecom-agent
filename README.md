@@ -1,40 +1,60 @@
 # 企业微信 AI 助手平台
 
-一个面向企业微信机器人的内部 AI 助手平台。项目支持多机器人、多上下文路由、Web 可视化管理、MCP 工具接入、技能扩展、定时任务和会话监控，适合在团队内部部署多个不同职责的企业微信 AI 助手。
+企业微信 AI 助手平台是一套面向企业内部协作场景的多机器人管理与 Agent 运行平台。它将企业微信智能机器人接入、模型调用、上下文路由、MCP 工具、可安装技能包、Wiki 知识库、定时任务和会话监控集中到一个 Web 控制台中管理，帮助团队把不同职责的 AI 助手稳定部署到群聊或单聊中。
+
+平台适合用于客服与售前问答、研发知识库检索、运营日报生成、流程提醒、内部制度答疑、会议与群聊知识沉淀等场景。每个机器人可以独立配置企业微信凭证和模型供应商，每个群聊或用户又可以绑定到不同上下文，从而让同一个平台同时承载多个业务角色，而不是只运行一个固定提示词的聊天机器人。
+
+[插入图片：平台整体架构图。建议展示“企业微信群聊/用户 → 企业微信 Bot WebSocket → API/BotManager → AgentEngine → 模型供应商、MCP 工具、Skill 运行时、Wiki MCP Server、SQLite/libSQL 数据库 → Web 控制台”的调用关系；如果使用 Docker 部署，请标出 `api`、`web`、`wiki-mcp` 三个服务和共享的 `wiki-data`/`api-data` volume。]
+
+## 核心价值
+
+- 集中管理：通过 Web 控制台统一维护机器人、上下文、群聊绑定、MCP 服务、技能包、定时任务、Wiki 知识库和会话记录，减少手动改配置和重启服务的成本。
+- 多角色隔离：同一平台可运行多个企业微信机器人；同一机器人也可按群聊或用户路由到不同上下文，分别配置系统提示词、会话 TTL、可用工具和知识范围。
+- 工具与知识扩展：支持 SSE/stdio MCP 服务、提示词技能包、脚本技能包和 Wiki MCP 工具，让机器人可以读取文档、调用外部系统、执行受控脚本并沉淀新知识。
+- 可观测与可运维：提供机器人启停、运行状态 SSE、会话查看与清除、技能包审计记录、Wiki 健康检查、定时任务下次运行时间等管理能力。
+- 面向生产部署：采用 pnpm workspace monorepo、Express API、React 控制台和 Docker Compose 组织服务，数据库默认使用 SQLite/libSQL 文件，便于小团队私有化部署和迁移。
 
 ## 主要能力
 
-- 多机器人管理：每个机器人独立配置企业微信凭证、模型供应商、MCP 服务、技能和运行状态。
-- 多上下文路由：为不同群聊或用户绑定不同系统提示词、工具能力和会话策略。
-- 模型接入：支持 OpenAI-compatible、Anthropic 和 Dify 应用。
-- MCP 工具：可为机器人配置 SSE 或 stdio 类型的 MCP 服务，并按上下文启用、传参或强制调用。
-- 技能系统：支持 prompt 技能和脚本技能，包含参数 schema、权限策略和审计记录。
-- 企业微信消息处理：支持文本、图片、引用消息、语音识别文本、混合消息和流式回复。
-- 会话管理：按 chatKey 维护多轮会话，支持 TTL、Dify conversationId 和后台会话查看。
-- 定时任务：通过 cron 表达式向指定会话定时发送任务提示。
-- Web 控制台：提供登录、机器人、上下文、群聊绑定、MCP、技能、定时任务和会话监控页面。
+- 机器人管理：为每个 Bot 独立配置企业微信 Bot ID、Bot Secret、WebSocket URL、模型供应商、视觉模式、流式回复模式和运行状态。
+- 上下文路由：按 `chatKey` 将企业微信群聊或单聊绑定到指定 Context；Context 内维护系统提示词、会话过期时间、MCP 配置和 Skill 配置。
+- 模型接入：支持 OpenAI-compatible、Anthropic 和 Dify 应用；Dify 模式会维护 conversationId，普通模型模式基于本地 Session 保存多轮上下文。
+- 消息处理：支持文本、图片、引用消息、语音识别文本、混合消息、群聊 @ 前缀清理、图片解密与多模态输入；回复支持普通 Markdown 和企业微信流式更新。
+- MCP 工具：支持配置 SSE 或 stdio 类型 MCP Server，可按上下文启用、传入参数 schema、设置固定调用或由模型按需调用。
+- 技能包系统：支持上传包含 `SKILL.md` 的技能包文件夹，记录元数据、资源索引、权限策略和脚本审计；脚本权限可限制超时、输出大小、读写路径、环境变量和网络访问。
+- Wiki 知识库：通过“知识库空间（Namespace）”管理本地 Markdown 文档，支持配置体检、上传、浏览、检索调试、草稿审核、运营看板、同步最新、健康检查，并通过 `wiki-mcp-server` 暴露检索和写入工具给机器人。
+- 定时任务：通过 cron 表达式向指定群聊或用户发送提示词模板，适合日报、巡检、知识整理和固定流程提醒。
+- 会话监控：按会话查看多轮消息、最后活跃时间、过期时间，并支持清除指定会话历史。
+
+[插入图片：Web 控制台总览截图。建议截取登录后的主界面，画面中应能看到左侧导航和“机器人管理、MCP 服务器、技能包、定时任务、Wiki 知识库、会话监控”等入口；主内容区建议停留在机器人列表页，展示机器人名称、模型供应商、运行状态和启动/停止操作。]
 
 ## 技术栈
 
 - Monorepo：pnpm workspace
-- API 服务：Node.js 20、Express 5、JWT、libSQL/SQLite
+- API 服务：Node.js 20、Express 5、JWT、libSQL/SQLite、node-cron
 - Web 控制台：React 18、Vite、Ant Design、React Router、Axios
-- 核心运行时：LangChain、LangGraph、企业微信机器人 SDK、MCP SDK
-- 部署：Docker Compose、Nginx 静态站点反向代理 API
+- Agent 运行时：LangChain、LangGraph、OpenAI-compatible/Anthropic Chat Model、Dify API Client
+- 企业微信接入：企业微信智能机器人 WebSocket SDK，支持消息解析、图片解密、断线重连和流式回复
+- 工具扩展：Model Context Protocol SDK、SSE/stdio MCP Client、受控 Script Skill 运行时
+- Wiki 服务：独立 `wiki-mcp-server`，通过 SSE 暴露 Wiki 读写、搜索、列表和 Git Pull 工具
+- 部署：Docker Compose，Web 容器使用 Nginx 托管静态资源并反向代理 API
 
 ## 项目结构
 
 ```text
 wecom-agent/
 ├─ apps/
-│  ├─ api/                 # Express API、数据库初始化、BotManager、定时任务调度
-│  └─ web/                 # React + Vite 管理控制台
+│  ├─ api/                    # Express API、数据库初始化、BotManager、定时任务调度、Wiki 管理接口
+│  └─ web/                    # React + Vite 管理控制台
 ├─ packages/
-│  ├─ core/                # AgentEngine、WeComAdapter、MCP、Dify、技能运行时
-│  └─ types/               # 前后端共享 TypeScript 类型
-├─ openspec/               # OpenSpec 规格与变更记录
-├─ data/                   # 本地数据库目录
-├─ docker-compose.yml      # API + Web 一体化部署
+│  ├─ core/                   # AgentEngine、WeComAdapter、MCP Client、Dify Client、Skill 运行时
+│  ├─ types/                  # 前后端共享 TypeScript 类型
+│  └─ wiki-mcp-server/        # Wiki MCP Server、Wiki 工具、Git 同步逻辑和 wiki-compiler Skill 模板
+├─ examples/
+│  └─ skills/                 # 可上传安装的示例 Skill 包
+├─ openspec/                  # OpenSpec 规格与变更记录
+├─ data/                      # 本地数据库和 Wiki 数据目录
+├─ docker-compose.yml         # api + web + wiki-mcp 一体化部署
 ├─ pnpm-workspace.yaml
 └─ .env.example
 ```
@@ -148,6 +168,8 @@ API 容器中的数据库默认保存到 Docker volume `api-data`，容器内路
 
 ## 控制台配置流程
 
+[插入图片：机器人到上下文的配置流程截图。建议使用拼接图或连续截图，依次展示“新建/编辑机器人”弹窗、“上下文”页面中的系统提示词、MCP/Skill 启用区域，以及“绑定”页面中将已发现群聊或用户绑定到 Context 的操作；截图中请脱敏 Bot Secret、API Key、群 ID 和真实成员信息。]
+
 1. 登录 Web 控制台。
 2. 创建机器人，填写企业微信 Bot ID、Bot Secret、WebSocket URL。
 3. 选择模型供应商：
@@ -161,15 +183,17 @@ API 容器中的数据库默认保存到 Docker volume `api-data`，容器内路
 8. 启动机器人，观察状态和会话监控。
 9. 如需自动触发任务，创建定时任务并填写 cron 表达式、目标会话和提示模板。
 
+[插入图片：企业微信实际对话效果截图。建议展示群聊中 @机器人提问、机器人基于上下文或 Wiki 给出 Markdown 回复、以及流式回复完成后的最终效果；如需展示图片或引用消息处理，可选择包含图片/引用消息的示例。请先脱敏群名称、成员头像、客户信息和内部业务数据。]
+
 ## 核心概念
 
 | 概念 | 说明 |
 | --- | --- |
-| Bot | 一个企业微信机器人实例，包含企业微信凭证、模型配置和运行状态。 |
-| Context | 机器人在某类会话中的行为配置，包含系统提示词、会话 TTL、MCP 与技能配置。 |
+| 机器人（Bot） | 一个企业微信机器人实例，包含企业微信凭证、模型配置和运行状态。 |
+| 上下文（Context） | 机器人在某类会话中的行为配置，包含系统提示词、会话 TTL、MCP 与技能配置。 |
 | Binding | 将具体企业微信群聊或用户的 `chatKey` 绑定到某个上下文。 |
-| MCP Server | 可被 Agent 调用的外部工具服务，可在上下文中选择启用并传入参数。 |
-| Skill | 平台内置扩展能力，可是纯 prompt，也可是受权限策略约束的脚本工具。 |
+| MCP 服务（MCP Server） | 可被 Agent 调用的外部工具服务，可在上下文中选择启用并传入参数。 |
+| 技能包（Skill） | 平台内置扩展能力，可是纯提示词，也可是受权限策略约束的脚本工具。 |
 | Session | 按会话保存的多轮消息历史，可在控制台查看和删除。 |
 | Scheduled Task | 使用 cron 表达式定时向指定会话发送提示。 |
 
@@ -232,12 +256,21 @@ API 容器中的数据库默认保存到 Docker volume `api-data`，容器内路
 
 ## Wiki 知识库
 
-平台内置 Wiki 知识库系统，让 Bot 能够访问持续更新的领域文档。Wiki 由两部分共同工作：
+平台内置 Wiki 知识库系统，让机器人能够访问持续更新的领域文档，并帮助管理员持续运营知识质量。Wiki 由两部分共同工作：
 
-- API 读取 `WIKI_ROOT`，用于 Web Console 的 Namespace、文档浏览、搜索、上传、草稿审核和健康检查。
-- `wiki-mcp-server` 读取同一个 `WIKI_ROOT`，通过 SSE 向 Bot 暴露 `wiki_read`、`wiki_search`、`wiki_write`、`wiki_append`、`wiki_list` 和 `wiki_git_pull` 工具。
+[插入图片：Wiki 知识库工作流截图。建议展示知识库空间列表、文档树、搜索与预览、绑定到机器人/上下文、健康状态和知识草稿审核区域；如果空间有限，优先展示“知识库空间 → 文档搜索 → 绑定上下文 → 草稿合并”的闭环。]
 
-本地开发时建议把 `WIKI_ROOT` 写成绝对路径。`pnpm dev:api` 和 `pnpm dev:wiki-mcp` 分别在不同 workspace 包目录下运行，如果使用相对路径，两个进程可能会读到不同的 Wiki 目录，表现为控制台能看到文档但 Bot 没有命中，或者 Bot 提示没有可用 Wiki 工具。
+- API 读取 `WIKI_ROOT`，用于 Web 控制台的知识库空间、文档浏览、搜索、上传、草稿审核和健康检查。
+- `wiki-mcp-server` 读取同一个 `WIKI_ROOT`，通过 SSE 向机器人暴露 `wiki_read`、`wiki_search`、`wiki_write`、`wiki_append`、`wiki_list` 和 `wiki_git_pull` 工具。
+
+Web 控制台的 Wiki 页面现在包含几块核心工作区：
+
+- 配置体检中心：检查 `WIKI_ROOT`、Git、wiki-mcp、MCP 服务、知识库空间、上下文绑定和关联机器人运行状态，并提供修复入口。
+- 文档与检索调试：浏览 Markdown 文件树，按关键词搜索正文，测试检索并查看检索词、命中数量、命中文档、摘要和耗时。
+- 知识草稿审核：编辑草稿、选择追加/覆盖/仅创建合并策略、预览合并差异，再批准或驳回。
+- 运营看板：查看知识库空间的文档数、绑定数、待审核草稿数、近 7 天检索次数、无命中次数、热门命中文档和热门无命中问题。
+
+本地开发时建议把 `WIKI_ROOT` 写成绝对路径。`pnpm dev:api` 和 `pnpm dev:wiki-mcp` 分别在不同 workspace 包目录下运行，如果使用相对路径，两个进程可能会读到不同的 Wiki 目录，表现为控制台能看到文档但机器人没有命中，或者机器人提示没有可用 Wiki 工具。
 
 ### 环境变量
 
@@ -250,9 +283,9 @@ WIKI_GIT_REMOTE=
 
 说明：
 
-- `WIKI_ROOT` 是 Wiki 根目录，建议初始化为 Git 仓库；Namespace 文件实际位于 `WIKI_ROOT/namespaces/<namespace-path>`。
-- `WIKI_MCP_PORT` 是 wiki-mcp-server 监听端口。端口冲突时可改为 `3002` 等，但 `.env`、健康检查地址和 MCP Server URL 必须保持一致。
-- `WIKI_MCP_URL` 是 API 使用的 Wiki MCP 基础地址，不要追加 `/sse`。在 Web Console 的 MCP Server URL 中使用 `http://127.0.0.1:<port>/sse`。
+- `WIKI_ROOT` 是 Wiki 根目录，建议初始化为 Git 仓库；知识库空间文件实际位于 `WIKI_ROOT/namespaces/<namespace-path>`。
+- `WIKI_MCP_PORT` 是 wiki-mcp-server 监听端口。端口冲突时可改为 `3002` 等，但 `.env`、健康检查地址和 MCP 服务 URL 必须保持一致。
+- `WIKI_MCP_URL` 是 API 使用的 Wiki MCP 基础地址，不要追加 `/sse`。在 Web 控制台的 MCP 服务 URL 中使用 `http://127.0.0.1:<port>/sse`。
 - Docker Compose 会让 API 使用 `http://wiki-mcp:3001` 访问 Wiki MCP，容器内 Wiki 根目录为 `/data/wiki`。
 
 ### 快速上手
@@ -274,7 +307,7 @@ git -C E:\path\to\wecom-agent\apps\api\data\wiki init
 git -C E:\path\to\wecom-agent\apps\api\data\wiki commit --allow-empty -m "init wiki"
 ```
 
-**2. 启动 Wiki MCP Server**
+**2. 启动 Wiki MCP 服务**
 
 首次启动前先构建，因为本地 dev 脚本运行的是 `dist`：
 
@@ -292,23 +325,23 @@ WIKI_MCP_PORT=3002
 WIKI_MCP_URL=http://127.0.0.1:3002
 ```
 
-随后在 MCP Server 配置中使用 `http://127.0.0.1:3002/sse`。
+随后在 MCP 服务配置中使用 `http://127.0.0.1:3002/sse`。
 
-**3. 在 Web Console 创建 Namespace**
+**3. 在 Web 控制台创建知识库空间**
 
-访问 Web Console → Wiki 知识库 → 新建 Namespace，填写标识符（如 `product`）和目录路径（如 `product`）。目录路径是相对 `WIKI_ROOT/namespaces` 的路径。
+访问 Web 控制台 → Wiki 知识库 → 新建知识库，填写标识符（如 `product`）、展示名称（如“产品知识库”）和目录路径（如 `product`）。目录路径是相对 `WIKI_ROOT/namespaces` 的路径。
 
-**4. 在 Bot 中注册 Wiki MCP Server**
+**4. 为机器人注册 Wiki MCP 服务**
 
-Web Console → MCP 服务器 → 新建，填写：
+Web 控制台 → MCP 服务器 → 新建，填写：
 - 名称：`wiki-mcp`
 - URL：本地开发使用 `http://127.0.0.1:3001/sse`；如果端口改为 `3002`，使用 `http://127.0.0.1:3002/sse`；Docker Compose 内部使用 `http://wiki-mcp:3001/sse`
 - 传输类型：SSE
 - 状态：启用
 
-**5. 在 Context 中绑定 Namespace**
+**5. 在上下文中绑定知识库空间**
 
-Web Console → 机器人 → 上下文 → 编辑，在 MCP 配置中启用 `wiki-mcp`，设置 params：
+Web 控制台 → 机器人 → 上下文 → 编辑，在 MCP 配置中启用 `wiki-mcp`，设置参数：
 
 ```json
 {
@@ -321,10 +354,10 @@ Web Console → 机器人 → 上下文 → 编辑，在 MCP 配置中启用 `wi
 常用检索策略：
 
 - `manual`：只暴露工具，由模型按需主动调用。
-- `autoSearch`：Bot 收到问题后先用用户问题搜索 Wiki，再把命中摘要注入系统提示。
+- `autoSearch`：机器人收到问题后先用用户问题搜索 Wiki，再把命中摘要注入系统提示。
 - `fixedPage`：固定读取某个页面，适合制度、SOP 或常驻上下文；可同时设置 `forceCallPage` 和 `maxChars`。
 
-修改 MCP 服务 URL、启用状态或 Context 的 MCP 配置后，需要重启对应 Bot。Bot 在启动时加载 MCP 工具，不重启可能仍然使用旧配置。
+修改 MCP 服务 URL、启用状态或上下文的 MCP 配置后，需要重启对应机器人。机器人在启动时加载 MCP 工具，不重启可能仍然使用旧配置。
 
 ### 验证 Wiki 是否可用
 
@@ -344,32 +377,35 @@ Web Console → 机器人 → 上下文 → 编辑，在 MCP 配置中启用 `wi
 
    `rootConfigured`、`rootExists` 和 `wikiMcp` 应为 `ok` 或可解释的 warning。
 
-3. 在 Web Console → Wiki 知识库 → 健康状态里执行测试检索。测试词要使用文档中真实存在的关键词；通用词如“测试”可能没有命中，但不代表工具不可用。
+3. 在 Web 控制台 → Wiki 知识库 → 健康状态里执行测试检索。页面会展示检索词、命中数量、命中文档、摘要和耗时；测试词要使用文档中真实存在的关键词，通用词如“测试”可能没有命中，但不代表工具不可用。
 
-4. 在企业微信里向已绑定 Context 的 Bot 提问。若 Bot 回复“没有可用的 Wiki 检索工具”，按下面的排障清单检查。
+4. 在企业微信里向已绑定上下文的机器人提问。若机器人回复“没有可用的 Wiki 检索工具”，按下面的排障清单检查。
+
+5. 在 Web 控制台 → Wiki 知识库 → 运营中观察近 7 天检索次数、无命中问题和热门命中文档。无命中问题可一键转为知识草稿，补充答案后再审核合并。
 
 ### Wiki 排障
 
-- Bot 提示没有 Wiki 工具：确认 MCP 服务器已启用，URL 是 `/sse` 结尾，Context 中已启用该 MCP 配置，并重启 Bot。
-- 控制台有文档但 Bot 搜不到：确认 API 与 wiki-mcp-server 的 `WIKI_ROOT` 是同一个绝对路径，并检查 `http://127.0.0.1:<port>/health` 返回的 `wikiRoot`。
-- 本地 `localhost` 连接异常：优先把 MCP Server URL 写成 `http://127.0.0.1:<port>/sse`，避免 IPv4/IPv6 解析差异。
+- 机器人提示没有 Wiki 工具：确认 MCP 服务器已启用，URL 是 `/sse` 结尾，上下文中已启用该 MCP 配置，并重启机器人。
+- 控制台有文档但机器人搜不到：确认 API 与 wiki-mcp-server 的 `WIKI_ROOT` 是同一个绝对路径，并检查 `http://127.0.0.1:<port>/health` 返回的 `wikiRoot`。
+- 本地 `localhost` 连接异常：优先把 MCP 服务 URL 写成 `http://127.0.0.1:<port>/sse`，避免 IPv4/IPv6 解析差异。
 - 搜索结果为空：换用文档标题、文件名或正文里的真实关键词；`wiki_search` 是关键词检索，不会凭空召回语义相近但没有字面命中的内容。
-- 修改端口后仍连旧服务：检查 `.env` 的 `WIKI_MCP_PORT`、`WIKI_MCP_URL`、Web Console 的 MCP Server URL 是否一致，并停止旧端口上的 wiki-mcp 实例。
+- 修改端口后仍连旧服务：检查 `.env` 的 `WIKI_MCP_PORT`、`WIKI_MCP_URL`、Web 控制台的 MCP 服务 URL 是否一致，并停止旧端口上的 wiki-mcp 实例。
 
 ### Obsidian 集成
 
 1. 用 Obsidian 打开 `WIKI_ROOT` 目录作为 Vault
 2. 安装 [obsidian-git](https://github.com/denolehov/obsidian-git) 插件
 3. 配置自动 commit + push 间隔（建议 5 分钟）
-4. 在 Web Console 点击"同步最新（Git Pull）"或等待 wiki-mcp-server 定时拉取
+4. 在 Web 控制台点击“同步最新”，或等待 wiki-mcp-server 定时拉取
 
 ### 知识沉淀与审核
 
 推荐把新知识先沉淀为待审核草稿，再由管理员合并到正式 Wiki 页面：
 
-1. 在 Web Console → Wiki 知识库 → 知识草稿中创建草稿，填写目标页面和 Markdown 内容。
-2. 审核通过后点击合并，系统会写入 `WIKI_ROOT/namespaces/<namespace>/<targetPath>` 并尝试提交 Git commit。
-3. 对需要自动沉淀的场景，可以用定时任务让 Bot 汇总当天会话，并把结果发到管理员群，由管理员复制为草稿或在确认后使用 `wiki_write`/`wiki_append`。
+1. 在 Web 控制台 → Wiki 知识库 → 知识草稿中创建草稿，填写目标页面和 Markdown 内容；也可以从运营看板的无命中问题一键转草稿。
+2. 审核前可编辑草稿，选择追加、覆盖或仅创建新页面，并查看合并前差异预览。
+3. 审核通过后点击合并，系统会写入 `WIKI_ROOT/namespaces/<namespace>/<targetPath>` 并尝试提交 Git commit。
+4. 对需要自动沉淀的场景，可以用定时任务让机器人汇总当天会话，并把结果发到管理员群，由管理员复制为草稿或在确认后使用 `wiki_write`/`wiki_append`。
 
 定时任务示例：
 
@@ -382,8 +418,8 @@ Web Console → 机器人 → 上下文 → 编辑，在 MCP 配置中启用 `wi
 }
 ```
 
-### wiki-compiler Skill
+### wiki-compiler 技能包
 
-`examples/skills/wiki-compiler.zip` 是一个可安装的 Script Skill，在对话结束后自动提炼知识写入 Wiki。
+`examples/skills/wiki-compiler.zip` 是一个可安装的脚本技能包，在对话结束后自动提炼知识写入 Wiki。
 
-在 Web Console → Skills → 上传，选择 `wiki-compiler.zip` 安装，然后在 Context 的 Skill 配置中启用。
+在 Web 控制台 → 技能包 → 上传，选择 `wiki-compiler.zip` 安装，然后在上下文的技能包配置中启用。

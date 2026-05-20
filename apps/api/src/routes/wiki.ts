@@ -10,14 +10,17 @@ import { ContextRepository } from '../db/context-repository.js'
 import { McpServerRepository } from '../db/mcp-server-repository.js'
 import { WikiDraftRepository } from '../db/wiki-draft-repository.js'
 import { WikiNamespaceRepository, type WikiNamespace } from '../db/wiki-namespace-repository.js'
+import { WikiRetrievalLogRepository } from '../db/wiki-retrieval-log-repository.js'
 
 export const wikiRouter: Router = Router()
 
 const WIKI_ROOT = process.env.WIKI_ROOT ?? ''
 const WIKI_MCP_HEALTH_URL = wikiMcpBaseUrl()
+const DEFAULT_METRICS_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 type HealthStatus = 'ok' | 'warning' | 'error' | 'unknown'
 type RetrievalPolicy = 'manual' | 'autoSearch' | 'fixedPage'
+type MergeStrategy = 'append' | 'replace' | 'createOnly'
 
 interface FileNode {
   name: string
@@ -221,6 +224,49 @@ function healthItem(status: HealthStatus, message: string) {
   return { status, message }
 }
 
+function parseNumberQuery(value: unknown): number | undefined {
+  if (Array.isArray(value)) value = value[0]
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function queryWindow(req: Request): { since: number; until?: number } {
+  const since = parseNumberQuery(req.query.since) ?? Date.now() - DEFAULT_METRICS_WINDOW_MS
+  const until = parseNumberQuery(req.query.until)
+  return until === undefined ? { since } : { since, until }
+}
+
+function mergeStrategy(value: unknown, fallback: string | undefined = 'append'): MergeStrategy {
+  if (value === 'replace' || value === 'createOnly' || value === 'append') return value
+  if (fallback === 'replace' || fallback === 'createOnly' || fallback === 'append') return fallback
+  return 'append'
+}
+
+function mergedContent(existing: string, content: string, strategy: MergeStrategy): string {
+  if (strategy === 'replace' || !existing) return content
+  const separator = existing && !existing.endsWith('\n') ? '\n\n' : existing ? '\n' : ''
+  return `${existing}${separator}${content}`
+}
+
+function textDiff(before: string, after: string): string[] {
+  if (before === after) return ['  (no changes)']
+  const beforeLines = before.split(/\r?\n/)
+  const afterLines = after.split(/\r?\n/)
+  const max = Math.max(beforeLines.length, afterLines.length)
+  const lines: string[] = []
+  for (let i = 0; i < max; i += 1) {
+    const oldLine = beforeLines[i]
+    const newLine = afterLines[i]
+    if (oldLine === newLine) {
+      if (oldLine !== undefined) lines.push(`  ${oldLine}`)
+    } else {
+      if (oldLine !== undefined) lines.push(`- ${oldLine}`)
+      if (newLine !== undefined) lines.push(`+ ${newLine}`)
+    }
+  }
+  return lines
+}
+
 function wikiMcpBaseUrl(): string {
   const configured = process.env.WIKI_MCP_URL?.trim()
   const baseUrl = configured || `http://localhost:${process.env.WIKI_MCP_PORT ?? 3001}`
@@ -258,15 +304,59 @@ async function getGlobalHealth() {
     wikiMcp = healthItem('warning', err instanceof Error ? err.message : String(err))
   }
 
+  const [namespaces, servers, contexts, bots] = await Promise.all([
+    WikiNamespaceRepository.findAll(),
+    McpServerRepository.findAll(),
+    ContextRepository.findAll(),
+    BotRepository.findAll(),
+  ])
+  const wikiServers = servers.filter(isWikiMcpServer)
+  const enabledWikiServers = wikiServers.filter((server) => server.enabled)
+  const wikiServerIds = new Set(enabledWikiServers.map((server) => server.id))
+  const wikiContextBindings = contexts.filter((ctx) =>
+    (ctx.mcpConfigs ?? []).some((cfg) => cfg.enabled && wikiServerIds.has(cfg.mcpServerId) && namespacesFromConfig(cfg).length > 0)
+  )
+  const boundBotIds = new Set(wikiContextBindings.map((ctx) => ctx.botId))
+  const boundBots = bots.filter((bot) => boundBotIds.has(bot.id))
+  const runningBoundBots = boundBots.filter((bot) => bot.status === 'running')
+  const mcpServer = enabledWikiServers.length > 0
+    ? healthItem('ok', `${enabledWikiServers.length} enabled wiki-mcp server(s)`)
+    : wikiServers.length > 0
+      ? healthItem('warning', 'wiki-mcp server exists but is disabled')
+      : healthItem('error', 'wiki-mcp server is not configured')
+  const namespaceStatus = namespaces.length > 0
+    ? healthItem('ok', `${namespaces.length} namespace(s) configured`)
+    : healthItem('warning', 'No Wiki namespace configured')
+  const contextBindings = wikiContextBindings.length > 0
+    ? healthItem('ok', `${wikiContextBindings.length} context binding(s) configured`)
+    : healthItem('warning', 'No Context is bound to Wiki')
+  const botRuntime = boundBots.length === 0
+    ? healthItem('unknown', 'No Wiki-bound Bot to check')
+    : runningBoundBots.length > 0
+      ? healthItem('ok', `${runningBoundBots.length}/${boundBots.length} Wiki-bound Bot(s) running`)
+      : healthItem('warning', 'Wiki-bound Bot(s) are not running or may need restart')
+
   return {
     wikiRoot: WIKI_ROOT,
     wikiMcpUrl: WIKI_MCP_HEALTH_URL,
+    diagnostics: {
+      namespaceCount: namespaces.length,
+      wikiMcpServerCount: wikiServers.length,
+      enabledWikiMcpServerCount: enabledWikiServers.length,
+      wikiContextBindingCount: wikiContextBindings.length,
+      wikiBoundBotCount: boundBots.length,
+      runningWikiBoundBotCount: runningBoundBots.length,
+    },
     items: {
       rootConfigured: healthItem(WIKI_ROOT ? 'ok' : 'error', WIKI_ROOT ? 'WIKI_ROOT configured' : 'WIKI_ROOT is missing'),
       rootExists: healthItem(rootExists ? 'ok' : 'error', rootExists ? 'Directory exists' : 'Directory missing'),
       gitRepo,
       gitRemote,
       wikiMcp,
+      mcpServer,
+      namespaces: namespaceStatus,
+      contextBindings,
+      botRuntime,
     },
   }
 }
@@ -365,14 +455,16 @@ wikiRouter.get('/:namespace/search', async (req, res) => {
   const ns = await findNamespaceOr404(nsParam(req), res)
   if (!ns) return
   const query = String(req.query.q ?? req.query.query ?? '')
+  const startedAt = Date.now()
   const results = await searchNamespace(ns, query)
+  const durationMs = Date.now() - startedAt
   lastSearchTests.set(ns.name, {
     status: results.length > 0 ? 'ok' : 'warning',
     testedAt: Date.now(),
     query,
     hitCount: results.length,
   })
-  res.json({ query, results })
+  res.json({ query, results, hitCount: results.length, durationMs })
 })
 
 // GET /api/wiki/:namespace/health
@@ -382,13 +474,84 @@ wikiRouter.get('/:namespace/health', async (req, res) => {
   if (!ns) return
   const files = await collectMdFiles(namespaceDir(ns))
   const bindings = await bindingSummary(ns.name)
+  const pendingDraftCount = await WikiDraftRepository.countPendingByNamespace(ns.name)
+  const recent = await WikiRetrievalLogRepository.countByNamespace(ns.name, Date.now() - DEFAULT_METRICS_WINDOW_MS)
   const latestModifiedAt = files.reduce<number | null>((latest, file) => latest === null ? file.updatedAt : Math.max(latest, file.updatedAt), null)
   res.json({
     namespace: ns.name,
     fileCount: files.length,
     latestModifiedAt,
     bindingCount: bindings.length,
+    pendingDraftCount,
+    recentMissCount: recent.misses,
     lastSearchTest: lastSearchTests.get(ns.name) ?? null,
+  })
+})
+
+// GET /api/wiki/:namespace/retrieval-logs
+wikiRouter.get('/:namespace/retrieval-logs', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const { since, until } = queryWindow(req)
+  const logs = await WikiRetrievalLogRepository.findByNamespace(ns.name, {
+    since,
+    until,
+    missesOnly: req.query.missesOnly === 'true' || req.query.missesOnly === '1',
+    limit: parseNumberQuery(req.query.limit),
+  })
+  res.json({ namespace: ns.name, since, until: until ?? null, logs })
+})
+
+// GET /api/wiki/:namespace/misses
+wikiRouter.get('/:namespace/misses', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const { since, until } = queryWindow(req)
+  const misses = until === undefined
+    ? await WikiRetrievalLogRepository.summarizeMisses(ns.name, since, parseNumberQuery(req.query.limit) ?? 20)
+    : (await WikiRetrievalLogRepository.findByNamespace(ns.name, { since, until, missesOnly: true, limit: 500 }))
+      .reduce((map, log) => {
+        const item = map.get(log.query) ?? { query: log.query, count: 0, latestAt: 0, contextIds: [] as string[], chatKeys: [] as string[] }
+        item.count += 1
+        item.latestAt = Math.max(item.latestAt, log.createdAt)
+        if (log.contextId && !item.contextIds.includes(log.contextId)) item.contextIds.push(log.contextId)
+        if (log.chatKey && !item.chatKeys.includes(log.chatKey)) item.chatKeys.push(log.chatKey)
+        map.set(log.query, item)
+        return map
+      }, new Map<string, { query: string; count: number; latestAt: number; contextIds: string[]; chatKeys: string[] }>())
+  const list = Array.isArray(misses)
+    ? misses
+    : [...misses.values()].sort((a, b) => b.count - a.count || b.latestAt - a.latestAt).slice(0, parseNumberQuery(req.query.limit) ?? 20)
+  res.json({ namespace: ns.name, since, until: until ?? null, misses: list })
+})
+
+// GET /api/wiki/:namespace/metrics
+wikiRouter.get('/:namespace/metrics', async (req, res) => {
+  if (!wikiRootRequired(res)) return
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const { since, until } = queryWindow(req)
+  const [files, bindings, pendingDraftCount, retrievalCounts, hotDocuments, topMisses] = await Promise.all([
+    collectMdFiles(namespaceDir(ns)),
+    bindingSummary(ns.name),
+    WikiDraftRepository.countPendingByNamespace(ns.name),
+    WikiRetrievalLogRepository.countByNamespace(ns.name, since),
+    WikiRetrievalLogRepository.hotDocuments(ns.name, since, 10),
+    WikiRetrievalLogRepository.summarizeMisses(ns.name, since, 10),
+  ])
+  const latestModifiedAt = files.reduce<number | null>((latest, file) => latest === null ? file.updatedAt : Math.max(latest, file.updatedAt), null)
+  res.json({
+    namespace: ns.name,
+    since,
+    until: until ?? null,
+    fileCount: files.length,
+    bindingCount: bindings.length,
+    pendingDraftCount,
+    latestModifiedAt,
+    retrievalCount: retrievalCounts.total,
+    missCount: retrievalCounts.misses,
+    hotDocuments,
+    topMisses,
   })
 })
 
@@ -491,8 +654,64 @@ wikiRouter.post('/:namespace/drafts', async (req, res) => {
     content,
     sourceType: String(body.sourceType ?? 'manual'),
     sourceRef: body.sourceRef ? String(body.sourceRef) : null,
+    mergeStrategy: mergeStrategy(body.mergeStrategy),
   })
   res.status(201).json(draft)
+})
+
+// PUT /api/wiki/:namespace/drafts/:id
+wikiRouter.put('/:namespace/drafts/:id', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const draft = await WikiDraftRepository.findById(req.params.id)
+  if (!draft || draft.namespace !== ns.name) { res.status(404).json({ error: 'draft not found' }); return }
+  if (draft.status !== 'pending') { res.status(409).json({ error: 'draft is not pending' }); return }
+  const body = req.body as Record<string, unknown>
+  const nextTarget = body.targetPath !== undefined ? String(body.targetPath) : undefined
+  const nextContent = body.content !== undefined ? String(body.content) : undefined
+  if (nextTarget !== undefined && !safeRelativePath(nextTarget, true)) {
+    res.status(400).json({ error: 'invalid target path' })
+    return
+  }
+  if (nextContent !== undefined && !nextContent.trim()) {
+    res.status(400).json({ error: 'content is required' })
+    return
+  }
+  const updated = await WikiDraftRepository.update(draft.id, {
+    targetPath: nextTarget,
+    content: nextContent,
+    sourceRef: body.sourceRef !== undefined ? String(body.sourceRef ?? '') || null : undefined,
+    mergeStrategy: body.mergeStrategy !== undefined ? mergeStrategy(body.mergeStrategy) : undefined,
+    reviewReason: body.reviewReason !== undefined ? String(body.reviewReason ?? '') || null : undefined,
+  })
+  res.json(updated)
+})
+
+// GET /api/wiki/:namespace/drafts/:id/diff
+wikiRouter.get('/:namespace/drafts/:id/diff', async (req, res) => {
+  if (!wikiRootRequired(res)) return
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const draft = await WikiDraftRepository.findById(req.params.id)
+  if (!draft || draft.namespace !== ns.name) { res.status(404).json({ error: 'draft not found' }); return }
+  const strategy = mergeStrategy(req.query.strategy, draft.mergeStrategy)
+  const safeTarget = safeRelativePath(draft.targetPath, true)
+  if (!safeTarget) { res.status(400).json({ error: 'invalid target path' }); return }
+  const full = join(namespaceDir(ns), safeTarget)
+  const targetExists = existsSync(full)
+  const currentContent = targetExists ? await readFile(full, 'utf-8') : ''
+  const nextContent = strategy === 'createOnly' && targetExists ? currentContent : mergedContent(currentContent, draft.content, strategy)
+  res.json({
+    draftId: draft.id,
+    namespace: ns.name,
+    targetPath: safeTarget,
+    strategy,
+    targetExists,
+    currentContent,
+    nextContent,
+    diff: targetExists ? textDiff(currentContent, nextContent) : [`+ ${draft.content}`],
+    error: strategy === 'createOnly' && targetExists ? 'target file already exists' : null,
+  })
 })
 
 // POST /api/wiki/:namespace/drafts/:id/approve
@@ -507,14 +726,19 @@ wikiRouter.post('/:namespace/drafts/:id/approve', async (req, res) => {
   const safeTarget = safeRelativePath(draft.targetPath, true)
   if (!safeTarget) { res.status(400).json({ error: 'invalid target path' }); return }
   const full = join(namespaceDir(ns), safeTarget)
+  const strategy = mergeStrategy((req.body as Record<string, unknown>)?.mergeStrategy, draft.mergeStrategy)
   try {
     await mkdir(dirname(full), { recursive: true })
-    const existing = existsSync(full) ? await readFile(full, 'utf-8') : ''
-    const separator = existing && !existing.endsWith('\n') ? '\n\n' : existing ? '\n' : ''
-    await writeFile(full, `${existing}${separator}${draft.content}`, 'utf-8')
+    const targetExists = existsSync(full)
+    const existing = targetExists ? await readFile(full, 'utf-8') : ''
+    if (strategy === 'createOnly' && targetExists) {
+      res.status(409).json({ error: 'target file already exists' })
+      return
+    }
+    await writeFile(full, mergedContent(existing, draft.content, strategy), 'utf-8')
     const git = simpleGit(WIKI_ROOT)
     await git.add(full)
-    await git.commit(`wiki: approve draft ${draft.id} to ${ns.name}/${safeTarget}`)
+    await git.commit(`wiki: approve draft ${draft.id} to ${ns.name}/${safeTarget} (${strategy})`)
     const merged = await WikiDraftRepository.markMerged(draft.id, String((req.body as Record<string, unknown>)?.reviewedBy ?? 'admin'))
     res.json(merged)
   } catch (err) {

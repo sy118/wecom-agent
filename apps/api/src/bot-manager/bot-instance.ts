@@ -3,6 +3,7 @@ import type { StructuredTool } from '@langchain/core/tools'
 import { AgentEngine, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpTools, createSkillTools } from '@wecom-platform/core'
 import { SessionStore } from '../session-store.js'
 import { SkillAuditRepository } from '../db/skill-audit-repository.js'
+import { WikiRetrievalLogRepository } from '../db/wiki-retrieval-log-repository.js'
 import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, SessionMessage } from '@wecom-platform/types'
 
 const QUEUE_BACKPRESSURE_LIMIT = 10
@@ -271,7 +272,10 @@ export class BotInstance {
       let systemPrompt = injectAllowedProjects(context.systemPrompt, context.mcpConfigs ?? [])
       systemPrompt = injectWikiNamespace(systemPrompt, context.mcpConfigs ?? [])
       systemPrompt = appendSkillPrompts(systemPrompt, buildSkillPromptAdditions([...this.skillToolPool.values()], context.skillConfigs ?? [], content))
-      const promptWithForcedResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content)
+      const promptWithForcedResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content, {
+        contextId: context.id,
+        chatKey,
+      })
 
       if (streamingMode === 'progressive') {
         await this.handleProgressive(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame)
@@ -344,7 +348,8 @@ export class BotInstance {
   private async executeForceCallMcps(
     systemPrompt: string,
     mcpConfigs: McpConfig[],
-    content: string | IncomingContent[]
+    content: string | IncomingContent[],
+    runtimeMeta: { contextId?: string; chatKey?: string } = {}
   ): Promise<string> {
     const results: string[] = []
     const FORCE_CALL_TIMEOUT_MS = 55_000
@@ -370,15 +375,36 @@ export class BotInstance {
       if (policy === 'fixedPage' || forceCallPage) {
         const wikiReadTool = findTool('wiki_read')
         if (wikiReadTool) {
+          const startedAt = Date.now()
           try {
             const output = await this.invokeWithTimeout(wikiReadTool, {
               path: forceCallPage,
               namespace,
               max_chars: Number(cfg.params?.maxChars ?? 6000),
             }, FORCE_CALL_TIMEOUT_MS)
+            const textOutput = typeof output === 'string' ? output : JSON.stringify(output)
+            await this.recordWikiRetrieval({
+              namespace,
+              policy: 'fixedPage',
+              query: forceCallPage ?? '',
+              hitCount: isWikiReadHit(textOutput) ? 1 : 0,
+              hitPaths: forceCallPage && isWikiReadHit(textOutput) ? [forceCallPage] : [],
+              durationMs: Date.now() - startedAt,
+              ...runtimeMeta,
+            })
             results.push(`[wiki_read: ${forceCallPage}]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
           } catch (err) {
             console.error(`[BotInstance:${this.deps.bot.id}] Force-call wiki_read failed:`, err)
+            await this.recordWikiRetrieval({
+              namespace,
+              policy: 'fixedPage',
+              query: forceCallPage ?? '',
+              hitCount: 0,
+              hitPaths: [],
+              durationMs: Date.now() - startedAt,
+              error: err instanceof Error ? err.message : String(err),
+              ...runtimeMeta,
+            })
           }
           continue
         }
@@ -387,15 +413,37 @@ export class BotInstance {
       if (policy === 'autoSearch' || findTool('wiki_search')) {
         const wikiSearchTool = findTool('wiki_search')
         if (wikiSearchTool) {
+          const startedAt = Date.now()
           try {
             const output = await this.invokeWithTimeout(wikiSearchTool, {
               query,
               namespace,
               cross_ns: Boolean(cfg.params?.crossNs),
             }, FORCE_CALL_TIMEOUT_MS)
+            const textOutput = typeof output === 'string' ? output : JSON.stringify(output)
+            const hits = extractWikiSearchHits(textOutput)
+            await this.recordWikiRetrieval({
+              namespace,
+              policy: 'autoSearch',
+              query,
+              hitCount: hits.hitCount,
+              hitPaths: hits.hitPaths,
+              durationMs: Date.now() - startedAt,
+              ...runtimeMeta,
+            })
             results.push(`[wiki_search]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
           } catch (err) {
             console.error(`[BotInstance:${this.deps.bot.id}] Force-call wiki_search failed:`, err)
+            await this.recordWikiRetrieval({
+              namespace,
+              policy: 'autoSearch',
+              query,
+              hitCount: 0,
+              hitPaths: [],
+              durationMs: Date.now() - startedAt,
+              error: err instanceof Error ? err.message : String(err),
+              ...runtimeMeta,
+            })
           }
           continue
         }
@@ -415,6 +463,36 @@ export class BotInstance {
 
     if (results.length === 0) return systemPrompt
     return `${systemPrompt}\n\n# 强制检索结果\n\n${results.join('\n\n')}`
+  }
+
+  private async recordWikiRetrieval(data: {
+    namespace?: string
+    policy: string
+    query: string
+    hitCount: number
+    hitPaths: string[]
+    durationMs: number
+    error?: string
+    contextId?: string
+    chatKey?: string
+  }): Promise<void> {
+    if (!data.namespace) return
+    try {
+      await WikiRetrievalLogRepository.create({
+        botId: this.deps.bot.id,
+        contextId: data.contextId ?? null,
+        chatKey: data.chatKey ?? null,
+        namespace: data.namespace,
+        policy: data.policy,
+        query: data.query,
+        hitCount: data.hitCount,
+        hitPaths: data.hitPaths,
+        durationMs: data.durationMs,
+        error: data.error ?? null,
+      })
+    } catch (err) {
+      console.error(`[BotInstance:${this.deps.bot.id}] Failed to record Wiki retrieval log:`, err)
+    }
   }
 
   private async handleNone(
@@ -726,6 +804,21 @@ function injectWikiNamespace(systemPrompt: string, mcpConfigs: McpConfig[]): str
   const marker = '## Wiki 知识库'
   if (systemPrompt.includes(marker)) return systemPrompt
   return `${systemPrompt}\n\n## Wiki 知识库\n${nsText}`
+}
+
+function isWikiReadHit(output: string): boolean {
+  const normalized = output.trim()
+  if (!normalized) return false
+  return !/页面不存在|错误:|not found|error/i.test(normalized)
+}
+
+function extractWikiSearchHits(output: string): { hitCount: number; hitPaths: string[] } {
+  if (!output.trim() || output.includes('未找到匹配页面')) return { hitCount: 0, hitPaths: [] }
+  const hitPaths = [...output.matchAll(/\[[^\]]+\]\s+.+?\(([^)]+\.md)\)/g)]
+    .map((match) => match[1])
+    .filter((path): path is string => Boolean(path))
+  if (hitPaths.length > 0) return { hitCount: hitPaths.length, hitPaths: [...new Set(hitPaths)] }
+  return { hitCount: 1, hitPaths: [] }
 }
 
 function injectAllowedProjects(systemPrompt: string, mcpConfigs: McpConfig[]): string {
