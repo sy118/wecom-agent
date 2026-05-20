@@ -168,6 +168,15 @@ function resourceTags(skill: SkillDefinition) {
   )
 }
 
+function skillUploadError(err: any): string {
+  const raw = String(err?.response?.data?.error ?? '')
+  if (!raw) return '上传失败'
+  if (raw.includes('YAML frontmatter') || raw.includes('frontmatter')) {
+    return 'SKILL.md 需要以 YAML 元数据开头：--- / name / description / ---'
+  }
+  return raw
+}
+
 export default function SkillsPage() {
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const [skills, setSkills] = useState<SkillDefinition[]>([])
@@ -244,7 +253,7 @@ export default function SkillsPage() {
       setFileList([])
       await load()
     } catch (err: any) {
-      message.error(err?.response?.data?.error ?? '上传失败')
+      message.error(skillUploadError(err))
     } finally {
       setUploading(false)
     }
@@ -353,7 +362,7 @@ export default function SkillsPage() {
       <Alert
         type="info"
         showIcon
-        message="上传包含顶层 SKILL.md 的文件夹。安装后可在任意机器人的上下文配置中启用。"
+        message="上传包含顶层 SKILL.md 的文件夹。SKILL.md 需以 YAML 元数据开头，至少包含 name 和 description。"
       />
 
       <div

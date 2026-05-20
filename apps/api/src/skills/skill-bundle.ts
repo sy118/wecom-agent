@@ -8,6 +8,7 @@ const MAX_FILES = 200
 const MAX_TOTAL_BYTES = 10 * 1024 * 1024
 const MAX_FILE_BYTES = 2 * 1024 * 1024
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$/
+const FRONTMATTER_ERROR = 'SKILL.md 必须以 YAML frontmatter 开头，例如：\n---\nname: my-skill\ndescription: 技能说明\n---'
 
 export interface UploadedSkillFile {
   originalname: string
@@ -48,8 +49,9 @@ function stripCommonRoot(paths: string[]): Map<string, string> {
 }
 
 function parseFrontmatter(skillMd: string): SkillBundleMetadata {
-  const match = skillMd.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/)
-  if (!match) throw new Error('SKILL.md must start with YAML frontmatter')
+  const normalizedSkillMd = skillMd.replace(/^\uFEFF/, '').replace(/^\s+(?=---\r?\n)/, '')
+  const match = normalizedSkillMd.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/)
+  if (!match) throw new Error(FRONTMATTER_ERROR)
   const metadata: Record<string, string> = {}
   for (const line of match[1].split(/\r?\n/)) {
     const next = line.match(/^([A-Za-z0-9_-]+):\s*(.*)$/)
@@ -60,9 +62,9 @@ function parseFrontmatter(skillMd: string): SkillBundleMetadata {
   const name = metadata.name
   const description = metadata.description
   if (!name || !SKILL_NAME_PATTERN.test(name)) {
-    throw new Error('SKILL.md frontmatter name must use lowercase letters, digits, and hyphens')
+    throw new Error('SKILL.md frontmatter 中的 name 只能使用小写字母、数字和连字符')
   }
-  if (!description) throw new Error('SKILL.md frontmatter description is required')
+  if (!description) throw new Error('SKILL.md frontmatter 必须包含 description')
   return { ...metadata, name, description }
 }
 

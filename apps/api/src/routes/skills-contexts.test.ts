@@ -190,6 +190,26 @@ test('Skill upload API installs bundle and previews SKILL.md', async () => {
   assert.equal(deleted.response.status, 204)
 })
 
+test('Skill upload API accepts SKILL.md with BOM and leading blank lines', async () => {
+  const form = new FormData()
+  appendSkillFile(form, 'bom-skill/SKILL.md', `\uFEFF
+
+---
+name: bom-skill
+description: bom skill description
+---
+
+# BOM Skill
+`)
+
+  const created = await fetch(`${baseUrl}/api/skills/upload`, { method: 'POST', body: form })
+  const body = await created.json()
+
+  assert.equal(created.status, 201)
+  assert.equal(body.name, 'bom-skill')
+  assert.equal(body.description, 'bom skill description')
+})
+
 test('Skill upload API rejects missing SKILL.md', async () => {
   const form = new FormData()
   appendSkillFile(form, 'bad/scripts/echo.js', "process.stdout.write('ok')\n")

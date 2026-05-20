@@ -1,8 +1,12 @@
 {
   "name": "wiki-compiler",
   "version": "1.0.0",
-  "description": "从对话历史提炼知识写入 Wiki 知识库",
+  "description": "从对话历史中提炼知识并创建待审核 Wiki 草稿",
+  "type": "module",
   "main": "index.js",
+  "bin": {
+    "wiki-compiler": "index.js"
+  },
   "skill": {
     "type": "script",
     "runtime": "node",
