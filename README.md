@@ -94,7 +94,9 @@ ADMIN_PASSWORD=your-admin-password-here
 JWT_SECRET=your-random-jwt-secret-here
 DB_PATH=./data/wecom-platform.db
 API_PORT=3000
+API_HOST=127.0.0.1
 WEB_PORT=8080
+WEB_HOST=127.0.0.1
 ```
 
 机器人、模型、MCP 和技能配置主要在 Web 控制台中维护，不再依赖旧版单机器人环境变量。
@@ -121,10 +123,10 @@ pnpm dev:web
 
 访问：
 
-- Web 控制台：http://localhost:5173
+- Web 控制台：http://127.0.0.1:8080
 - API 服务：http://localhost:3000
 
-Web 开发服务会把 `/api` 请求代理到 `http://localhost:3000`。登录密码为 `.env` 中的 `ADMIN_PASSWORD`。
+Web 开发服务会读取 `.env` 中的 `WEB_HOST` / `WEB_PORT` 启动，并把 `/api` 请求代理到 `API_HOST` / `API_PORT` 指向的 API 服务。登录密码为 `.env` 中的 `ADMIN_PASSWORD`。
 
 ## Docker 部署
 
@@ -161,7 +163,10 @@ API 容器中的数据库默认保存到 Docker volume `api-data`，容器内路
 | `JWT_SECRET` | JWT 签名密钥，建议使用随机长字符串 | 无 | 是 |
 | `DB_PATH` | SQLite/libSQL 数据库文件路径 | `./data/wecom-platform.db`，Docker 中为 `/data/wecom-platform.db` | 否 |
 | `API_PORT` | API 服务端口 | `3000` | 否 |
-| `WEB_PORT` | Docker 部署时 Web 对外端口 | `8080` | 否 |
+| `API_HOST` | Web 本地开发代理连接的 API 地址 | `127.0.0.1` | 否 |
+| `API_BASE_URL` | Web 本地开发代理目标；设置后优先于 `API_HOST` / `API_PORT` | 无 | 否 |
+| `WEB_PORT` | Web 管理台端口；Docker 部署时为对外端口，本地开发时为 Vite 端口 | `8080` | 否 |
+| `WEB_HOST` | Web 本地开发监听地址；局域网访问可设为 `0.0.0.0` | `127.0.0.1` | 否 |
 | `WIKI_ROOT` | Wiki 知识库根目录，API 与 wiki-mcp-server 必须指向同一目录 | `./data/wiki`，Docker 中为 `/data/wiki` | 否 |
 | `WIKI_MCP_PORT` | Wiki MCP Server 端口 | `3001` | 否 |
 | `WIKI_MCP_URL` | Wiki MCP 基础地址，API 健康检查使用；MCP SSE 地址在此基础上追加 `/sse` | `http://localhost:3001`，Docker 中为 `http://wiki-mcp:3001` | 否 |
@@ -241,7 +246,7 @@ API 容器中的数据库默认保存到 Docker volume `api-data`，容器内路
 - 登录后接口返回 401：JWT 过期或 `JWT_SECRET` 变更，重新登录即可。
 - `pnpm dev:api` 找不到 dist：先执行 `pnpm build` 或 `pnpm build:api`。
 - 修改源码后行为没有变化：API dev 脚本运行的是构建产物，需要重新构建对应包。
-- Web 请求 API 失败：确认 `pnpm dev:api` 已启动，且 Vite 代理目标 `http://localhost:3000` 可访问。
+- Web 请求 API 失败：确认 `pnpm dev:api` 已启动，且 `.env` 中 `API_HOST` / `API_PORT` 或 `API_BASE_URL` 指向的 API 服务可访问。
 - Docker Web 能打开但 API 不通：查看 `docker compose logs -f api`，并确认 `.env` 中的必要变量已设置。
 - 机器人无法连接企业微信：检查 Bot ID、Bot Secret、WebSocket URL 是否正确，查看 API 日志中的连接或重连信息。
 - MCP 工具不可用：确认 MCP 服务启用、URL/transport 正确，并且上下文中已启用对应 MCP 配置。
