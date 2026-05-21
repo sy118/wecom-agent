@@ -2,8 +2,8 @@ import { Router, type Request } from 'express'
 import multer from 'multer'
 import { readdir, stat, readFile, writeFile, mkdir, unlink } from 'fs/promises'
 import { existsSync } from 'fs'
-import { dirname, extname, join, normalize, relative } from 'path'
-import { simpleGit } from 'simple-git'
+import { dirname, extname, join, normalize, relative, resolve } from 'path'
+import { simpleGit, type SimpleGit } from 'simple-git'
 import type { ContextConfig, McpConfig, McpServerConfig, WikiFeedbackClassification, WikiFeedbackItem, WikiFeedbackStatus } from '@wecom-platform/types'
 import { BotRepository } from '../db/bot-repository.js'
 import { ContextRepository } from '../db/context-repository.js'
@@ -93,6 +93,49 @@ function namespaceDir(ns: WikiNamespace): string {
   return join(WIKI_ROOT, 'namespaces', ns.path)
 }
 
+function comparablePath(path: string): string {
+  const normalized = normalize(resolve(path)).replace(/\\/g, '/').replace(/\/+$/, '')
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+function wikiGitPath(fullPath: string): string {
+  const rel = relative(WIKI_ROOT, fullPath).replace(/\\/g, '/')
+  if (!rel || rel.startsWith('..') || /^[a-zA-Z]:/.test(rel)) {
+    throw new Error('path is outside WIKI_ROOT')
+  }
+  return rel
+}
+
+async function hasGitConfig(git: SimpleGit, key: string): Promise<boolean> {
+  const value = await git.raw(['config', '--get', key]).catch(() => '')
+  return value.trim().length > 0
+}
+
+async function ensureWikiGitRepo(): Promise<SimpleGit> {
+  await mkdir(WIKI_ROOT, { recursive: true })
+  let git = simpleGit(WIKI_ROOT)
+  let needsInit = false
+  try {
+    const topLevel = await git.revparse(['--show-toplevel'])
+    needsInit = comparablePath(topLevel) !== comparablePath(WIKI_ROOT)
+  } catch {
+    needsInit = true
+  }
+
+  if (needsInit) {
+    await git.init()
+    git = simpleGit(WIKI_ROOT)
+  }
+
+  if (!await hasGitConfig(git, 'user.email')) {
+    await git.addConfig('user.email', 'wecom-agent@example.local')
+  }
+  if (!await hasGitConfig(git, 'user.name')) {
+    await git.addConfig('user.name', 'WeCom Agent')
+  }
+  return git
+}
+
 async function findNamespaceOr404(namespace: string, res: import('express').Response): Promise<WikiNamespace | null> {
   const ns = await WikiNamespaceRepository.findByName(namespace)
   if (!ns) {
@@ -165,7 +208,7 @@ async function searchNamespace(ns: WikiNamespace, query: string): Promise<Search
 }
 
 function isWikiMcpServer(server: McpServerConfig): boolean {
-  const haystack = `${server.name} ${server.url}`.toLowerCase()
+  const haystack = `${server.name} ${server.url ?? ''}`.toLowerCase()
   return haystack.includes('wiki-mcp') || haystack.includes('/wiki') || haystack.includes(':3001')
 }
 
@@ -989,8 +1032,8 @@ wikiRouter.post('/:namespace/drafts/:id/approve', async (req, res) => {
       return
     }
     await writeFile(full, mergedContent(existing, draft.content, strategy), 'utf-8')
-    const git = simpleGit(WIKI_ROOT)
-    await git.add(full)
+    const git = await ensureWikiGitRepo()
+    await git.add(wikiGitPath(full))
     await git.commit(`wiki: approve draft ${draft.id} to ${ns.name}/${safeTarget} (${strategy})`)
     const merged = await WikiDraftRepository.markMerged(draft.id, String((req.body as Record<string, unknown>)?.reviewedBy ?? 'admin'))
     await WikiFeedbackRepository.markResolvedByDraftId(draft.id)
@@ -1059,8 +1102,8 @@ wikiRouter.post('/:namespace/upload', upload.array('files'), async (req, res) =>
 
   if (uploaded.length > 0) {
     try {
-      const git = simpleGit(WIKI_ROOT)
-      await git.add(uploaded.map((file) => join(nsDir, file)))
+      const git = await ensureWikiGitRepo()
+      await git.add(uploaded.map((file) => wikiGitPath(join(nsDir, file))))
       await git.commit(`wiki: upload ${uploaded.length} file(s) to ${ns.name}`)
     } catch {
       // Git commit failure is non-fatal for manual uploads.
@@ -1081,8 +1124,8 @@ wikiRouter.delete('/:namespace/files/*filePath', async (req, res) => {
   if (!existsSync(full)) { res.status(404).json({ error: 'file not found' }); return }
   await unlink(full)
   try {
-    const git = simpleGit(WIKI_ROOT)
-    await git.add(full)
+    const git = await ensureWikiGitRepo()
+    await git.add(wikiGitPath(full))
     await git.commit(`wiki: delete ${ns.name}/${safePath}`)
   } catch {
     // Git commit failure is non-fatal for manual deletes.

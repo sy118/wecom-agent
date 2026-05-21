@@ -69,10 +69,14 @@ export async function initDb(): Promise<void> {
       id TEXT PRIMARY KEY,
       bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
-      url TEXT NOT NULL,
+      url TEXT,
       transport_type TEXT NOT NULL DEFAULT 'sse',
       enabled INTEGER NOT NULL DEFAULT 1,
-      param_schema TEXT
+      param_schema TEXT,
+      command TEXT,
+      args_json TEXT,
+      env_json TEXT,
+      headers_json TEXT
     );
 
     CREATE TABLE IF NOT EXISTS skills (
@@ -285,6 +289,10 @@ export async function initDb(): Promise<void> {
   `)
 
   await addColumnIfMissing('mcp_servers', 'param_schema', 'TEXT')
+  await addColumnIfMissing('mcp_servers', 'command', 'TEXT')
+  await addColumnIfMissing('mcp_servers', 'args_json', 'TEXT')
+  await addColumnIfMissing('mcp_servers', 'env_json', 'TEXT')
+  await addColumnIfMissing('mcp_servers', 'headers_json', 'TEXT')
   await addColumnIfMissing('skills', 'type', "TEXT NOT NULL DEFAULT 'bundle'")
   await addColumnIfMissing('skills', 'manifest_json', "TEXT NOT NULL DEFAULT '{}'")
   await addColumnIfMissing('skills', 'param_schema', 'TEXT')
@@ -300,7 +308,7 @@ export async function initDb(): Promise<void> {
   await seedDefaultSessionTtlSetting()
   await migrateAllowedProjects()
   await migrateScheduledTasksBotIdNullable()
-  await migrateMcpServersBotIdNullable()
+  await migrateMcpServersSchema()
   await migrateSkillsBotIdNullable()
   await seedBuiltinMcpServers()
 }
@@ -411,18 +419,34 @@ async function migrateScheduledTasksBotIdNullable(): Promise<void> {
   `)
 }
 
-async function migrateMcpServersBotIdNullable(): Promise<void> {
-  await migrateTableBotIdNullable('mcp_servers', `
+async function migrateMcpServersSchema(): Promise<void> {
+  const info = await db.execute('PRAGMA table_info(mcp_servers)')
+  const urlColumn = info.rows.find((r) => r.name === 'url')
+  const botIdColumn = info.rows.find((r) => r.name === 'bot_id')
+  if (urlColumn?.notnull === 0 && (!botIdColumn || botIdColumn.notnull === 0)) return
+
+  await db.execute(`
     CREATE TABLE IF NOT EXISTS mcp_servers_new (
       id TEXT PRIMARY KEY,
       bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
       name TEXT NOT NULL,
-      url TEXT NOT NULL,
+      url TEXT,
       transport_type TEXT NOT NULL DEFAULT 'sse',
       enabled INTEGER NOT NULL DEFAULT 1,
-      param_schema TEXT
+      param_schema TEXT,
+      command TEXT,
+      args_json TEXT,
+      env_json TEXT,
+      headers_json TEXT
     )
   `)
+  const newInfo = await db.execute('PRAGMA table_info(mcp_servers_new)')
+  const existingColumns = info.rows.map((r) => r.name as string)
+  const newColumns = new Set(newInfo.rows.map((r) => r.name as string))
+  const sharedColumns = existingColumns.filter((column) => newColumns.has(column))
+  await db.execute(`INSERT INTO mcp_servers_new (${sharedColumns.join(', ')}) SELECT ${sharedColumns.join(', ')} FROM mcp_servers`)
+  await db.execute('DROP TABLE mcp_servers')
+  await db.execute('ALTER TABLE mcp_servers_new RENAME TO mcp_servers')
 }
 
 async function migrateSkillsBotIdNullable(): Promise<void> {

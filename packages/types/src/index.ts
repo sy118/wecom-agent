@@ -145,13 +145,19 @@ export type ChatType = 'group' | 'user'
 
 // ─── MCP Server ───────────────────────────────────────────────────────────────
 
+export type McpServerTransportType = 'sse' | 'stdio' | 'streamable-http'
+
 export interface McpServerConfig {
   id: string
   botId: string | null
   name: string
-  url: string
-  transportType: 'sse' | 'stdio'
+  url: string | null
+  transportType: McpServerTransportType
   enabled: boolean
+  command?: string | null
+  args?: string[]
+  env?: Record<string, string>
+  headers?: Record<string, string>
   paramSchema?: ParamSchemaItem[]
 }
 

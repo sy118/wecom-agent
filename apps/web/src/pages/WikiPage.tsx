@@ -4,7 +4,7 @@ import {
   Popconfirm, Radio, Row, Select, Space, Statistic, Steps, Tabs, Tag, Tree, Typography, Upload, message,
 } from 'antd'
 import {
-  ApiOutlined, BookOutlined, CheckCircleOutlined, CloudSyncOutlined, DeleteOutlined, ExperimentOutlined,
+  ApiOutlined, BookOutlined, CloudSyncOutlined, DeleteOutlined, ExperimentOutlined,
   FileMarkdownOutlined, FolderOutlined, LinkOutlined, PlusOutlined, SearchOutlined, UploadOutlined,
 } from '@ant-design/icons'
 import type { DataNode } from 'antd/es/tree'
@@ -15,6 +15,9 @@ const { Paragraph, Text, Title } = Typography
 
 type RetrievalPolicy = 'manual' | 'autoSearch' | 'fixedPage'
 type HealthStatus = 'ok' | 'warning' | 'error' | 'unknown'
+type WorkbenchTab = 'documents' | 'actions' | 'feedback' | 'config' | 'analysis' | 'annotations'
+type ActionFilter = 'all' | 'config' | 'feedback' | 'miss' | 'draft'
+type ActionType = Exclude<ActionFilter, 'all'>
 
 interface WikiNamespace {
   id: string
@@ -159,6 +162,33 @@ interface DraftDiff {
   nextContent: string
   diff: string[]
   error: string | null
+}
+
+interface FeedbackDetail {
+  item: WikiFeedbackItem
+  evidence: {
+    responseRun?: WikiFeedbackItem['responseRun']
+    sessionMessages?: Array<{
+      role: string
+      content: string
+      timestamp?: number
+      responseRunId?: string | null
+    }>
+    retrievalLogs?: RetrievalLog[]
+  } | null
+}
+
+interface ActionItem {
+  id: string
+  type: ActionType
+  priority: number
+  title: string
+  description: string
+  status: string
+  statusColor: string
+  updatedAt?: number | null
+  actionLabel: string
+  onAction: () => void
 }
 
 interface McpServer { id: string; name: string; url: string; transportType: string; enabled: boolean; paramSchema?: unknown[] }
@@ -346,6 +376,22 @@ function strategyLabel(strategy?: string) {
   return '追加'
 }
 
+function actionTypeLabel(type: ActionFilter) {
+  if (type === 'config') return '配置'
+  if (type === 'feedback') return '反馈'
+  if (type === 'miss') return '无命中'
+  if (type === 'draft') return '草稿'
+  return '全部'
+}
+
+function actionTypeColor(type: ActionFilter) {
+  if (type === 'config') return 'red'
+  if (type === 'feedback') return 'volcano'
+  if (type === 'miss') return 'gold'
+  if (type === 'draft') return 'blue'
+  return 'default'
+}
+
 function fileNodesToTreeData(nodes: FileNode[], onDelete: (path: string) => void): DataNode[] {
   return nodes.map((node) => ({
     key: node.path,
@@ -395,7 +441,7 @@ export default function WikiPage() {
   const [feedbackContextFilter, setFeedbackContextFilter] = useState<string | undefined>()
   const [feedbackWindowDays, setFeedbackWindowDays] = useState<number>(7)
   const [feedbackDetailOpen, setFeedbackDetailOpen] = useState(false)
-  const [activeFeedbackDetail, setActiveFeedbackDetail] = useState<any>(null)
+  const [activeFeedbackDetail, setActiveFeedbackDetail] = useState<FeedbackDetail | null>(null)
   const [annotationAnswers, setAnnotationAnswers] = useState<AnnotationAnswer[]>([])
   const [mcpServers, setMcpServers] = useState<McpServer[]>([])
   const [bots, setBots] = useState<Bot[]>([])
@@ -413,7 +459,8 @@ export default function WikiPage() {
   const [testQuery, setTestQuery] = useState('')
   const [testResults, setTestResults] = useState<SearchResult[]>([])
   const [testPreview, setTestPreview] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState('documents')
+  const [activeTab, setActiveTab] = useState<WorkbenchTab>('documents')
+  const [actionFilter, setActionFilter] = useState<ActionFilter>('all')
   const [draftDetailOpen, setDraftDetailOpen] = useState(false)
   const [activeDraft, setActiveDraft] = useState<WikiDraft | null>(null)
   const [activeDraftStrategy, setActiveDraftStrategy] = useState<'append' | 'replace' | 'createOnly'>('append')
@@ -738,11 +785,24 @@ export default function WikiPage() {
 
   const createDraftFromMiss = async (miss: MissSummary) => {
     if (!selected) return
-    setActiveTab('drafts')
+    setActiveTab('actions')
+    setActionFilter('draft')
     draftForm.setFieldsValue({
       targetPath: `待补充/${Date.now()}.md`,
       content: `# ${miss.query}\n\n> 来源：无命中问题，出现 ${miss.count} 次。\n\n请补充标准答案。`,
       sourceRef: `retrieval-miss:${miss.query}`,
+    })
+  }
+
+  const createDraftFromSearch = (query: string) => {
+    if (!selected) return
+    setActiveTab('actions')
+    setActionFilter('draft')
+    draftForm.setFieldsValue({
+      targetPath: `待补充/${Date.now()}.md`,
+      content: `# ${query || '待补充问题'}\n\n> 来源：文档搜索无结果。\n\n请补充标准答案。`,
+      sourceRef: query ? `search-miss:${query}` : 'search-miss',
+      mergeStrategy: 'append',
     })
   }
 
@@ -756,11 +816,26 @@ export default function WikiPage() {
     }
   }
 
-  const openDraftDetail = async (draft: WikiDraft) => {
+  const findDraftFeedback = (draft: WikiDraft) => {
+    return feedbackItems.find((item) => item.draftId === draft.id || Boolean(draft.sourceRef?.includes(`feedback:${item.id}`)))
+      ?? null
+  }
+
+  const openDraftDetail = async (draft: WikiDraft, relatedFeedback?: WikiFeedbackItem | null) => {
     const strategy = draft.mergeStrategy ?? 'append'
     setActiveDraft(draft)
     setActiveDraftStrategy(strategy)
     setDraftDetailOpen(true)
+    const feedback = relatedFeedback ?? findDraftFeedback(draft)
+    if (selected && feedback) {
+      try {
+        setActiveFeedbackDetail(await wikiApi.feedbackDetail(selected.name, feedback.id))
+      } catch {
+        setActiveFeedbackDetail({ item: feedback, evidence: null })
+      }
+    } else {
+      setActiveFeedbackDetail(null)
+    }
     draftEditForm.setFieldsValue({
       targetPath: draft.targetPath,
       content: draft.content,
@@ -813,7 +888,8 @@ export default function WikiPage() {
 
   const updateFeedback = async (item: WikiFeedbackItem, data: Record<string, unknown>, success = '反馈已更新') => {
     if (!selected) return
-    await wikiApi.updateFeedback(selected.name, item.id, data)
+    const updated = await wikiApi.updateFeedback(selected.name, item.id, data)
+    setActiveFeedbackDetail((detail) => detail?.item?.id === item.id ? { ...detail, item: updated } : detail)
     message.success(success)
     refreshNamespace(selected)
   }
@@ -835,9 +911,10 @@ export default function WikiPage() {
       mergeStrategy: 'append',
     })
     message.success('已转为 Wiki 草稿')
-    setActiveTab('drafts')
+    setActiveTab('actions')
+    setActionFilter('draft')
     refreshNamespace(selected)
-    openDraftDetail(draft)
+    openDraftDetail(draft, item)
   }
 
   const createAnnotationFromFeedback = async (item: WikiFeedbackItem) => {
@@ -873,16 +950,31 @@ export default function WikiPage() {
     refreshNamespace(selected)
   }
 
+  const runConfigAction = (key: string) => {
+    if (key === 'mcpServer') { navigate('/mcp-servers'); return }
+    if (key === 'namespaces') { setCreateOpen(true); return }
+    if (key === 'contextBindings') { selected ? openBind() : setWizardOpen(true); return }
+    if (key === 'botRuntime') { navigate('/bots'); return }
+    if (key === 'wikiMcp') { registerWikiMcp(); return }
+    if (key === 'retrievalTest') { setActiveTab('config'); return }
+    setWizardOpen(true)
+  }
+
+  const configActionButton = (key: string) => {
+    const labels: Record<string, string> = {
+      mcpServer: '配置 MCP',
+      namespaces: '新建知识库',
+      contextBindings: '绑定上下文',
+      botRuntime: '查看机器人',
+      wikiMcp: '启用 wiki-mcp',
+      retrievalTest: '测试检索',
+    }
+    const label = labels[key]
+    return label ? <Button size="small" onClick={() => runConfigAction(key)}>{label}</Button> : null
+  }
+
   const renderHealthItems = () => {
     const items = health?.items ?? {}
-    const actionFor = (key: string) => {
-      if (key === 'mcpServer') return <Button size="small" onClick={() => navigate('/mcp-servers')}>配置 MCP</Button>
-      if (key === 'namespaces') return <Button size="small" onClick={() => setCreateOpen(true)}>新建知识库</Button>
-      if (key === 'contextBindings') return <Button size="small" onClick={() => selected ? openBind() : setWizardOpen(true)}>绑定上下文</Button>
-      if (key === 'botRuntime') return <Button size="small" onClick={() => navigate('/bots')}>查看机器人</Button>
-      if (key === 'wikiMcp') return <Button size="small" onClick={() => registerWikiMcp()}>启用 wiki-mcp</Button>
-      return null
-    }
     return (
       <Row gutter={[12, 12]}>
         {Object.entries(items).map(([key, value]: [string, any]) => (
@@ -892,7 +984,7 @@ export default function WikiPage() {
                 <Text strong>{healthItemLabel(key)}</Text>
                 <Tag color={healthColor(value.status)}>{healthStatusLabel(value.status)}</Tag>
                 <Text type="secondary" style={{ fontSize: 12 }}>{formatHealthMessage(value.message)}</Text>
-                {value.status !== 'ok' && actionFor(key)}
+                {value.status !== 'ok' && configActionButton(key)}
               </Space>
             </Card>
           </Col>
@@ -901,17 +993,131 @@ export default function WikiPage() {
     )
   }
 
+  const pendingDrafts = drafts.filter((draft) => draft.status === 'pending')
+  const actionableFeedback = feedbackItems.filter((item) => !['resolved', 'ignored'].includes(item.status))
+  const configIssueEntries = Object.entries(health?.items ?? {}).filter(([, value]: [string, any]) => value?.status && value.status !== 'ok')
+  const namespaceConfigIssue = selected && bindings.length === 0
+    ? [{
+      key: 'contextBindings',
+      status: 'warning',
+      message: '当前知识库空间尚未绑定上下文',
+    }]
+    : []
+  const configIssueCount = configIssueEntries.length + namespaceConfigIssue.length
+
+  const jumpToActions = (filter: ActionFilter) => {
+    setActionFilter(filter)
+    setActiveTab('actions')
+  }
+
+  const jumpToFeedback = (filter?: string) => {
+    setFeedbackStatusFilter(filter)
+    setActiveTab('feedback')
+    if (!selected) return
+    const since = feedbackWindowDays === 0 ? 0 : Date.now() - feedbackWindowDays * 24 * 60 * 60 * 1000
+    Promise.all([
+      wikiApi.feedback(selected.name, {
+        status: filter,
+        reason: feedbackReasonFilter,
+        contextId: feedbackContextFilter,
+        since,
+      }),
+      wikiApi.feedbackMetrics(selected.name, { since }),
+    ]).then(([feedbackData, feedbackMetricData]) => {
+      setFeedbackItems(feedbackData.items ?? [])
+      setFeedbackMetrics(feedbackMetricData.metrics ?? null)
+    }).catch((err: any) => {
+      message.error(wikiErrorMessage(err, '刷新反馈失败'))
+    })
+  }
+
+  const actionItems = ([
+    ...configIssueEntries.map(([key, value]: [string, any]) => ({
+      id: `config:${key}`,
+      type: 'config' as const,
+      priority: 10,
+      title: healthItemLabel(key),
+      description: formatHealthMessage(value.message),
+      status: healthStatusLabel(value.status),
+      statusColor: healthColor(value.status),
+      actionLabel: key === 'retrievalTest' ? '测试检索' : '去修复',
+      onAction: () => runConfigAction(key),
+    })),
+    ...namespaceConfigIssue.map((item) => ({
+      id: `config:${item.key}:namespace`,
+      type: 'config' as const,
+      priority: 11,
+      title: '当前空间未绑定上下文',
+      description: item.message,
+      status: '需关注',
+      statusColor: 'gold',
+      actionLabel: '绑定上下文',
+      onAction: openBind,
+    })),
+    ...actionableFeedback.map((item) => ({
+      id: `feedback:${item.id}`,
+      type: 'feedback' as const,
+      priority: item.feedbackType === 2 ? 20 : 24,
+      title: item.responseRun?.questionPreview ?? item.content ?? '未关联反馈',
+      description: [
+        feedbackTypeLabel(item.feedbackType),
+        item.inaccurateReasons.length ? `原因：${item.inaccurateReasons.map(inaccurateReasonLabel).join('、')}` : '',
+        item.content ?? '',
+      ].filter(Boolean).join(' / '),
+      status: feedbackStatusLabel(item.status),
+      statusColor: item.feedbackType === 2 ? 'red' : item.status === 'unlinked' ? 'default' : 'blue',
+      updatedAt: item.createdAt,
+      actionLabel: '查看证据',
+      onAction: () => openFeedbackDetail(item),
+    })),
+    ...misses.slice(0, 8).map((item) => ({
+      id: `miss:${item.query}`,
+      type: 'miss' as const,
+      priority: 30,
+      title: item.query,
+      description: `近 7 天无命中 ${item.count} 次`,
+      status: '可补充',
+      statusColor: 'gold',
+      updatedAt: item.latestAt,
+      actionLabel: '转草稿',
+      onAction: () => createDraftFromMiss(item),
+    })),
+    ...pendingDrafts.map((draft) => ({
+      id: `draft:${draft.id}`,
+      type: 'draft' as const,
+      priority: 40,
+      title: draft.targetPath,
+      description: `来源：${sourceTypeLabel(draft.sourceType)}${draft.sourceRef ? ` / ${draft.sourceRef}` : ''}`,
+      status: strategyLabel(draft.mergeStrategy),
+      statusColor: 'blue',
+      updatedAt: draft.createdAt,
+      actionLabel: '审核',
+      onAction: () => openDraftDetail(draft),
+    })),
+  ] as ActionItem[]).sort((a, b) => a.priority - b.priority || Number(b.updatedAt ?? 0) - Number(a.updatedAt ?? 0))
+
+  const filteredActionItems = actionFilter === 'all' ? actionItems : actionItems.filter((item) => item.type === actionFilter)
+
+  const actionSummaries = [
+    { key: 'config' as ActionFilter, title: '配置异常', value: configIssueCount, color: 'red' },
+    { key: 'feedback' as ActionFilter, title: '待处理反馈', value: actionableFeedback.length, color: 'volcano' },
+    { key: 'miss' as ActionFilter, title: '高频无命中', value: misses.length, color: 'gold' },
+    { key: 'draft' as ActionFilter, title: '待审核草稿', value: pendingDrafts.length, color: 'blue' },
+  ]
+
   const documentsTab = (
-    <Row gutter={16}>
-      <Col xs={24} xl={9}>
+    <Row gutter={[16, 16]}>
+      <Col xs={24} lg={8} xl={7}>
         <Card
           size="small"
           title="文档树"
           extra={
             <Space>
-              <Upload beforeUpload={handleUpload} showUploadList={false} multiple accept=".md">
-                <Button icon={<UploadOutlined />} size="small">上传</Button>
-              </Upload>
+              {fileTree.length > 0 && (
+                <Upload beforeUpload={handleUpload} showUploadList={false} multiple accept=".md">
+                  <Button icon={<UploadOutlined />} size="small">上传</Button>
+                </Upload>
+              )}
               <Button size="small" onClick={() => selected && refreshNamespace(selected)}>刷新</Button>
             </Space>
           }
@@ -919,14 +1125,22 @@ export default function WikiPage() {
           {treeLoading ? (
             <Text type="secondary">加载中...</Text>
           ) : fileTree.length === 0 ? (
-            <Empty description="暂无 Markdown 文件" />
+            <Empty description="暂无 Markdown 文件">
+              <Space wrap>
+                <Upload beforeUpload={handleUpload} showUploadList={false} multiple accept=".md">
+                  <Button icon={<UploadOutlined />}>上传文档</Button>
+                </Upload>
+                <Button onClick={() => createDraftFromSearch(searchQuery)}>新建草稿</Button>
+                <Button onClick={() => setActiveTab('config')}>查看配置</Button>
+              </Space>
+            </Empty>
           ) : (
             <Tree showIcon defaultExpandAll treeData={fileNodesToTreeData(fileTree, handleDeleteFile)} onSelect={handleFileSelect} />
           )}
         </Card>
       </Col>
-      <Col xs={24} xl={15}>
-        <Card size="small" title="搜索与预览">
+      <Col xs={24} lg={8} xl={7}>
+        <Card size="small" title="搜索文档">
           <Input.Search
             allowClear
             placeholder="搜索文件名或正文"
@@ -936,28 +1150,32 @@ export default function WikiPage() {
             onSearch={handleSearch}
             style={{ marginBottom: 12 }}
           />
-          {searchResults.length > 0 && (
+          {searchResults.length > 0 ? (
             <List
               size="small"
               dataSource={searchResults}
-              style={{ marginBottom: 16 }}
               renderItem={(item) => (
                 <List.Item onClick={() => handleFileSelect([item.path])} style={{ cursor: 'pointer' }}>
                   <List.Item.Meta title={<Space><FileMarkdownOutlined />{item.title}<Tag>{item.path}</Tag></Space>} description={item.excerpt || '匹配文件名'} />
                 </List.Item>
               )}
             />
-          )}
-          {searchAttempted && searchResults.length === 0 && (
-            <Empty description="没有找到匹配文档" style={{ marginBottom: 16 }}>
+          ) : searchAttempted ? (
+            <Empty description="没有找到匹配文档">
               <Space>
                 <Upload beforeUpload={handleUpload} showUploadList={false} multiple accept=".md">
                   <Button icon={<UploadOutlined />}>上传文档</Button>
                 </Upload>
-                <Button onClick={() => setActiveTab('drafts')}>新建草稿</Button>
+                <Button onClick={() => createDraftFromSearch(searchQuery)}>新建草稿</Button>
               </Space>
             </Empty>
+          ) : (
+            <Text type="secondary">输入业务词、页面标题或正文关键词，结果会直接联动右侧预览。</Text>
           )}
+        </Card>
+      </Col>
+      <Col xs={24} lg={8} xl={10}>
+        <Card size="small" title="Markdown 预览">
           {selectedFile ? (
             <Space direction="vertical" style={{ width: '100%' }} size={12}>
               <Descriptions size="small" column={2}>
@@ -965,7 +1183,7 @@ export default function WikiPage() {
                 <Descriptions.Item label="大小">{selectedFile.size} 字节</Descriptions.Item>
                 <Descriptions.Item label="最近修改">{formatTime(selectedFile.updatedAt)}</Descriptions.Item>
               </Descriptions>
-              <div style={{ border: '1px solid #f0f0f0', borderRadius: 6, padding: 16, maxHeight: 520, overflow: 'auto', whiteSpace: 'pre-wrap', lineHeight: 1.7 }}>
+              <div style={{ border: '1px solid #f0f0f0', borderRadius: 8, padding: 16, maxHeight: 520, overflow: 'auto', whiteSpace: 'pre-wrap', lineHeight: 1.7, wordBreak: 'break-word' }}>
                 {selectedFile.content}
               </div>
             </Space>
@@ -975,6 +1193,116 @@ export default function WikiPage() {
         </Card>
       </Col>
     </Row>
+  )
+
+  const actionsTab = (
+    <Space direction="vertical" style={{ width: '100%' }} size={16}>
+      <Card
+        size="small"
+        title="统一待办"
+        extra={
+          <Select
+            value={actionFilter}
+            onChange={setActionFilter}
+            style={{ width: 140 }}
+            options={[
+              { label: '全部待办', value: 'all' },
+              { label: '配置', value: 'config' },
+              { label: '反馈', value: 'feedback' },
+              { label: '无命中', value: 'miss' },
+              { label: '草稿', value: 'draft' },
+            ]}
+          />
+        }
+      >
+        {filteredActionItems.length === 0 ? (
+          <Empty description="暂无待处理事项">
+            <Space wrap>
+              <Button onClick={() => setActiveTab('documents')}>查看文档</Button>
+              <Button onClick={() => setActiveTab('analysis')}>查看分析</Button>
+            </Space>
+          </Empty>
+        ) : (
+          <List
+            dataSource={filteredActionItems}
+            renderItem={(item) => (
+              <List.Item actions={[<Button key="action" size="small" type={item.type === 'config' ? 'default' : 'primary'} onClick={item.onAction}>{item.actionLabel}</Button>]}>
+                <List.Item.Meta
+                  title={
+                    <Space wrap>
+                      <Tag color={actionTypeColor(item.type)}>{actionTypeLabel(item.type)}</Tag>
+                      <Text>{item.title}</Text>
+                      <Tag color={item.statusColor}>{item.status}</Tag>
+                    </Space>
+                  }
+                  description={
+                    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                      <Text type="secondary">{item.description}</Text>
+                      {item.updatedAt && <Text type="secondary">最近更新：{formatTime(item.updatedAt)}</Text>}
+                    </Space>
+                  }
+                />
+              </List.Item>
+            )}
+          />
+        )}
+      </Card>
+
+      <Row gutter={[16, 16]}>
+        <Col xs={24} xl={9}>
+          <Card size="small" title="新建草稿">
+            <Form form={draftForm} layout="vertical" onFinish={handleCreateDraft}>
+              <Form.Item name="targetPath" label="建议页面" rules={[{ required: true }]}>
+                <Input placeholder="faq/refund.md" />
+              </Form.Item>
+              <Form.Item name="content" label="Markdown 内容" rules={[{ required: true }]}>
+                <Input.TextArea rows={8} />
+              </Form.Item>
+              <Form.Item name="sourceRef" label="来源引用">
+                <Input placeholder="反馈、无命中问题、会话或备注" />
+              </Form.Item>
+              <Form.Item name="mergeStrategy" label="默认合并策略" initialValue="append">
+                <Select options={[
+                  { label: '追加到页面', value: 'append' },
+                  { label: '覆盖页面', value: 'replace' },
+                  { label: '仅创建新页面', value: 'createOnly' },
+                ]} />
+              </Form.Item>
+              <Button type="primary" htmlType="submit">保存草稿</Button>
+            </Form>
+          </Card>
+        </Col>
+        <Col xs={24} xl={15}>
+          <Card size="small" title="待审核知识">
+            {drafts.length === 0 ? <Empty description="暂无草稿" /> : (
+              <List
+                dataSource={drafts}
+                renderItem={(draft) => (
+                  <List.Item
+                    actions={draft.status === 'pending' ? [
+                      <Button key="detail" size="small" onClick={() => openDraftDetail(draft)}>详情</Button>,
+                      <Button key="approve" size="small" type="primary" onClick={() => approveDraft(draft)}>合并</Button>,
+                      <Button key="reject" size="small" danger onClick={() => rejectDraft(draft)}>拒绝</Button>,
+                    ] : [<Tag key="status">{statusLabel(draft.status)}</Tag>]}
+                  >
+                    <List.Item.Meta
+                      title={<Space wrap>{draft.targetPath}<Tag color={draft.status === 'pending' ? 'gold' : draft.status === 'merged' ? 'green' : 'red'}>{statusLabel(draft.status)}</Tag><Tag>{strategyLabel(draft.mergeStrategy)}</Tag></Space>}
+                      description={
+                        <Space direction="vertical" style={{ width: '100%' }}>
+                          <Text type="secondary">来源：{sourceTypeLabel(draft.sourceType)}{draft.sourceRef ? ` / ${draft.sourceRef}` : ''}</Text>
+                          {draft.reviewReason && <Text type="secondary">原因：{draft.reviewReason}</Text>}
+                          <Paragraph ellipsis={{ rows: 4, expandable: true }}>{draft.content}</Paragraph>
+                        </Space>
+                      }
+                    />
+                  </List.Item>
+                )}
+              />
+            )}
+          </Card>
+        </Col>
+      </Row>
+    </Space>
   )
 
   const bindingTab = (
@@ -1020,7 +1348,7 @@ export default function WikiPage() {
               <Upload beforeUpload={handleUpload} showUploadList={false} multiple accept=".md">
                 <Button icon={<UploadOutlined />}>上传文档</Button>
               </Upload>
-              <Button onClick={() => setActiveTab('drafts')}>创建草稿</Button>
+              <Button onClick={() => createDraftFromSearch(testQuery)}>创建草稿</Button>
             </Space>
           </Empty>
         )}
@@ -1059,76 +1387,25 @@ export default function WikiPage() {
           />
         )}
       </Card>
-      <Card size="small" title="全局健康状态">{renderHealthItems()}</Card>
     </Space>
   )
 
-  const draftsTab = (
-    <Row gutter={16}>
-      <Col xs={24} xl={9}>
-        <Card size="small" title="新建草稿">
-          <Form form={draftForm} layout="vertical" onFinish={handleCreateDraft}>
-            <Form.Item name="targetPath" label="建议页面" rules={[{ required: true }]}>
-              <Input placeholder="faq/refund.md" />
-            </Form.Item>
-            <Form.Item name="content" label="Markdown 内容" rules={[{ required: true }]}>
-              <Input.TextArea rows={8} />
-            </Form.Item>
-            <Form.Item name="sourceRef" label="来源引用">
-              <Input placeholder="会话、任务或备注" />
-            </Form.Item>
-            <Form.Item name="mergeStrategy" label="默认合并策略" initialValue="append">
-              <Select options={[
-                { label: '追加到页面', value: 'append' },
-                { label: '覆盖页面', value: 'replace' },
-                { label: '仅创建新页面', value: 'createOnly' },
-              ]} />
-            </Form.Item>
-            <Button type="primary" htmlType="submit">保存草稿</Button>
-          </Form>
-        </Card>
-      </Col>
-      <Col xs={24} xl={15}>
-        <Card size="small" title="待审核知识">
-          {drafts.length === 0 ? <Empty description="暂无草稿" /> : (
-            <List
-              dataSource={drafts}
-              renderItem={(draft) => (
-                <List.Item
-                  actions={draft.status === 'pending' ? [
-                    <Button key="detail" size="small" onClick={() => openDraftDetail(draft)}>详情</Button>,
-                    <Button key="approve" size="small" type="primary" onClick={() => approveDraft(draft)}>合并</Button>,
-                    <Button key="reject" size="small" danger onClick={() => rejectDraft(draft)}>拒绝</Button>,
-                  ] : [<Tag key="status">{statusLabel(draft.status)}</Tag>]}
-                >
-                  <List.Item.Meta
-                    title={<Space>{draft.targetPath}<Tag color={draft.status === 'pending' ? 'gold' : draft.status === 'merged' ? 'green' : 'red'}>{statusLabel(draft.status)}</Tag><Tag>{strategyLabel(draft.mergeStrategy)}</Tag></Space>}
-                    description={
-                      <Space direction="vertical" style={{ width: '100%' }}>
-                        <Text type="secondary">来源：{sourceTypeLabel(draft.sourceType)}{draft.sourceRef ? ` / ${draft.sourceRef}` : ''}</Text>
-                        {draft.reviewReason && <Text type="secondary">原因：{draft.reviewReason}</Text>}
-                        <Paragraph ellipsis={{ rows: 4, expandable: true }}>{draft.content}</Paragraph>
-                      </Space>
-                    }
-                  />
-                </List.Item>
-              )}
-            />
-          )}
-        </Card>
-      </Col>
-    </Row>
+  const configTab = (
+    <Space direction="vertical" style={{ width: '100%' }} size={16}>
+      {bindingTab}
+      {healthTab}
+    </Space>
   )
 
   const feedbackTab = (
     <Space direction="vertical" style={{ width: '100%' }} size={16}>
       <Row gutter={16}>
-        <Col xs={24} md={6}><Card><Statistic title="反馈总数" value={feedbackMetrics?.total ?? 0} /></Card></Col>
-        <Col xs={24} md={6}><Card><Statistic title="负反馈" value={feedbackMetrics?.negative ?? 0} /></Card></Col>
-        <Col xs={24} md={6}><Card><Statistic title="待处理" value={feedbackMetrics?.pending ?? 0} /></Card></Col>
-        <Col xs={24} md={6}><Card><Statistic title="已转草稿" value={feedbackMetrics?.drafted ?? 0} /></Card></Col>
+        <Col xs={24} md={6}><Card hoverable onClick={() => jumpToFeedback(undefined)}><Statistic title="反馈总数" value={feedbackMetrics?.total ?? 0} /></Card></Col>
+        <Col xs={24} md={6}><Card hoverable onClick={() => jumpToActions('feedback')}><Statistic title="负反馈" value={feedbackMetrics?.negative ?? 0} /></Card></Col>
+        <Col xs={24} md={6}><Card hoverable onClick={() => jumpToFeedback('new')}><Statistic title="待处理" value={feedbackMetrics?.pending ?? 0} /></Card></Col>
+        <Col xs={24} md={6}><Card hoverable onClick={() => jumpToFeedback('drafted')}><Statistic title="已转草稿" value={feedbackMetrics?.drafted ?? 0} /></Card></Col>
       </Row>
-      <Card size="small" title="反馈收件箱">
+      <Card size="small" title="反馈闭环">
         <Space wrap style={{ marginBottom: 12 }}>
           <Select
             allowClear
@@ -1183,9 +1460,6 @@ export default function WikiPage() {
               <List.Item
                 actions={[
                   <Button key="detail" size="small" onClick={() => openFeedbackDetail(item)}>详情</Button>,
-                  <Button key="draft" size="small" onClick={() => createDraftFromFeedback(item)}>转草稿</Button>,
-                  <Button key="annotation" size="small" onClick={() => createAnnotationFromFeedback(item)}>标注答案</Button>,
-                  <Button key="ignore" size="small" onClick={() => ignoreFeedback(item)}>忽略</Button>,
                 ]}
               >
                 <List.Item.Meta
@@ -1263,13 +1537,13 @@ export default function WikiPage() {
     </Row>
   )
 
-  const opsTab = (
+  const analysisTab = (
     <Space direction="vertical" style={{ width: '100%' }} size={16}>
       <Row gutter={16}>
-        <Col xs={24} md={6}><Card><Statistic title="文档数" value={metrics?.fileCount ?? namespaceHealth?.fileCount ?? countFiles(fileTree)} /></Card></Col>
-        <Col xs={24} md={6}><Card><Statistic title="绑定数" value={metrics?.bindingCount ?? bindings.length} /></Card></Col>
-        <Col xs={24} md={6}><Card><Statistic title="待审核草稿" value={metrics?.pendingDraftCount ?? drafts.filter((draft) => draft.status === 'pending').length} /></Card></Col>
-        <Col xs={24} md={6}><Card><Statistic title="7天无命中" value={metrics?.missCount ?? 0} /></Card></Col>
+        <Col xs={24} md={6}><Card hoverable onClick={() => setActiveTab('documents')}><Statistic title="文档数" value={metrics?.fileCount ?? namespaceHealth?.fileCount ?? countFiles(fileTree)} /></Card></Col>
+        <Col xs={24} md={6}><Card hoverable onClick={() => setActiveTab('config')}><Statistic title="绑定数" value={metrics?.bindingCount ?? bindings.length} /></Card></Col>
+        <Col xs={24} md={6}><Card hoverable onClick={() => jumpToActions('draft')}><Statistic title="待审核草稿" value={metrics?.pendingDraftCount ?? drafts.filter((draft) => draft.status === 'pending').length} /></Card></Col>
+        <Col xs={24} md={6}><Card hoverable onClick={() => jumpToActions('miss')}><Statistic title="7天无命中" value={metrics?.missCount ?? 0} /></Card></Col>
       </Row>
       <Row gutter={16}>
         <Col xs={24} md={12}>
@@ -1288,8 +1562,8 @@ export default function WikiPage() {
             {!metrics?.topMisses?.length ? (
               <Empty description="暂无无命中问题">
                 <Space>
-                  <Button onClick={() => setActiveTab('health')}>测试检索</Button>
-                  <Button onClick={() => setActiveTab('drafts')}>创建草稿</Button>
+                  <Button onClick={() => setActiveTab('config')}>测试检索</Button>
+                  <Button onClick={() => jumpToActions('draft')}>创建草稿</Button>
                 </Space>
               </Empty>
             ) : (
@@ -1317,13 +1591,23 @@ export default function WikiPage() {
     </Space>
   )
 
+  const activeDraftFeedback = activeDraft
+    ? feedbackItems.find((item) => item.draftId === activeDraft.id || Boolean(activeDraft.sourceRef?.includes(item.id)))
+    : null
+  const activeFeedbackEvidence = activeFeedbackDetail?.evidence
+  const activeFeedbackSessionMessages = activeFeedbackEvidence?.sessionMessages ?? []
+  const activeFeedbackRetrievalLogs = activeFeedbackEvidence?.retrievalLogs ?? []
+  const activeDraftEvidence = activeDraftFeedback && activeFeedbackDetail?.item?.id === activeDraftFeedback.id
+    ? activeFeedbackDetail.evidence
+    : null
+  const activeDraftRetrievalLogs = activeDraftEvidence?.retrievalLogs ?? []
+
   return (
-    <div style={{ padding: 24 }}>
-      <Row justify="space-between" align="middle" style={{ marginBottom: 16 }}>
+    <div style={{ padding: 'clamp(12px, 3vw, 24px)' }}>
+      <Row justify="space-between" align="middle" gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Title level={4} style={{ margin: 0 }}><BookOutlined style={{ marginRight: 8 }} />Wiki 知识库</Title>
-        <Space>
+        <Space wrap>
           <Button icon={<CloudSyncOutlined />} onClick={handleGitPull}>同步最新</Button>
-          <Button icon={<CheckCircleOutlined />} onClick={() => setWizardOpen(true)}>使用向导</Button>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => setCreateOpen(true)}>新建知识库</Button>
         </Space>
       </Row>
@@ -1335,11 +1619,38 @@ export default function WikiPage() {
           style={{ marginBottom: 16 }}
           message="Wiki 尚未完成完整配置"
           description="按向导完成知识库空间、wiki-mcp、上下文绑定和测试检索后，机器人才能稳定使用知识库。"
-          action={<Button size="small" onClick={() => setWizardOpen(true)}>开始向导</Button>}
+          action={<Button size="small" onClick={() => setWizardOpen(true)}>继续配置</Button>}
         />
       )}
 
-      <Card size="small" title="配置体检中心" style={{ marginBottom: 16 }}>
+      <Card size="small" title="行动总览" style={{ marginBottom: 16 }}>
+        <Row gutter={[16, 16]}>
+          {actionSummaries.map((item) => (
+            <Col xs={24} md={6} key={item.key}>
+              <Card size="small" hoverable onClick={() => jumpToActions(item.key)}>
+                <Statistic title={item.title} value={item.value} />
+                <Tag color={item.color} style={{ marginTop: 8 }}>{item.value > 0 ? '待处理' : '稳定'}</Tag>
+              </Card>
+            </Col>
+          ))}
+        </Row>
+        {actionItems.length === 0 && (
+          <Alert
+            type="success"
+            showIcon
+            style={{ marginTop: 12 }}
+            message="当前没有高优先级知识运营待办"
+            action={<Button size="small" onClick={() => setActiveTab('config')}>测试检索</Button>}
+          />
+        )}
+      </Card>
+
+      <Card
+        size="small"
+        title="配置清单"
+        style={{ marginBottom: 16 }}
+        extra={!shouldShowWizard ? <Button size="small" onClick={() => setWizardOpen(true)}>打开向导</Button> : null}
+      >
         {renderHealthItems()}
       </Card>
 
@@ -1396,15 +1707,14 @@ export default function WikiPage() {
               </Card>
               <Tabs
                 activeKey={activeTab}
-                onChange={setActiveTab}
+                onChange={(key) => setActiveTab(key as WorkbenchTab)}
                 items={[
                   { key: 'documents', label: '文档', children: documentsTab },
-                  { key: 'bindings', label: '绑定', children: bindingTab },
-                  { key: 'health', label: '健康状态', children: healthTab },
-                  { key: 'drafts', label: '知识草稿', children: draftsTab },
-                  { key: 'feedback', label: '反馈', children: feedbackTab },
+                  { key: 'actions', label: '待办', children: actionsTab },
+                  { key: 'feedback', label: '反馈闭环', children: feedbackTab },
+                  { key: 'config', label: '配置', children: configTab },
+                  { key: 'analysis', label: '分析', children: analysisTab },
                   { key: 'annotations', label: '标注答案', children: annotationTab },
-                  { key: 'ops', label: '运营', children: opsTab },
                 ]}
               />
             </Space>
@@ -1526,41 +1836,46 @@ export default function WikiPage() {
         open={feedbackDetailOpen}
         width={900}
         onCancel={() => { setFeedbackDetailOpen(false); setActiveFeedbackDetail(null) }}
-        footer={activeFeedbackDetail?.item ? [
-          <Button key="retrieval" onClick={() => updateFeedback(activeFeedbackDetail.item, { status: 'triaged', classification: 'retrieval_issue' }, '已标记为检索问题')}>检索问题</Button>,
-          <Button key="model" onClick={() => updateFeedback(activeFeedbackDetail.item, { status: 'triaged', classification: 'model_or_tool_issue' }, '已标记为模型/工具问题')}>模型/工具问题</Button>,
-          <Button key="ignore" onClick={() => ignoreFeedback(activeFeedbackDetail.item)}>忽略</Button>,
-          <Button key="draft" type="primary" onClick={() => createDraftFromFeedback(activeFeedbackDetail.item)}>转 Wiki 草稿</Button>,
-        ] : null}
+        footer={null}
       >
         {activeFeedbackDetail?.item && (
           <Space direction="vertical" style={{ width: '100%' }} size={12}>
-            <Descriptions size="small" column={2}>
-              <Descriptions.Item label="反馈类型">{feedbackTypeLabel(activeFeedbackDetail.item.feedbackType)}</Descriptions.Item>
-              <Descriptions.Item label="状态">{feedbackStatusLabel(activeFeedbackDetail.item.status)}</Descriptions.Item>
-              <Descriptions.Item label="分类">{feedbackClassificationLabel(activeFeedbackDetail.item.classification)}</Descriptions.Item>
-              <Descriptions.Item label="时间">{formatTime(activeFeedbackDetail.item.createdAt)}</Descriptions.Item>
-              <Descriptions.Item label="原因" span={2}>{activeFeedbackDetail.item.inaccurateReasons?.map(inaccurateReasonLabel).join('、') || '无'}</Descriptions.Item>
-              <Descriptions.Item label="用户补充" span={2}>{activeFeedbackDetail.item.content || '无'}</Descriptions.Item>
-            </Descriptions>
+            {!activeFeedbackDetail.item.responseRunId && (
+              <Alert
+                type="warning"
+                showIcon
+                message="该反馈未关联机器人回复"
+                description="系统已保留原始反馈，但无法自动反查原问题、原回答和检索证据。可以忽略或手动新建草稿。"
+              />
+            )}
+            <Card size="small" title="用户反馈">
+              <Descriptions size="small" column={2}>
+                <Descriptions.Item label="反馈类型">{feedbackTypeLabel(activeFeedbackDetail.item.feedbackType)}</Descriptions.Item>
+                <Descriptions.Item label="状态">{feedbackStatusLabel(activeFeedbackDetail.item.status)}</Descriptions.Item>
+                <Descriptions.Item label="分类">{feedbackClassificationLabel(activeFeedbackDetail.item.classification)}</Descriptions.Item>
+                <Descriptions.Item label="时间">{formatTime(activeFeedbackDetail.item.createdAt)}</Descriptions.Item>
+                <Descriptions.Item label="原因" span={2}>{activeFeedbackDetail.item.inaccurateReasons?.map(inaccurateReasonLabel).join('、') || '无'}</Descriptions.Item>
+                <Descriptions.Item label="用户补充" span={2}>{activeFeedbackDetail.item.content || '无'}</Descriptions.Item>
+              </Descriptions>
+            </Card>
             <Card size="small" title="原问题与回答">
-              <Paragraph strong>{activeFeedbackDetail.evidence?.responseRun?.questionPreview ?? '暂无问题'}</Paragraph>
-              <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{activeFeedbackDetail.evidence?.responseRun?.answerPreview ?? '暂无回答'}</Paragraph>
+              <Paragraph strong>{activeFeedbackEvidence?.responseRun?.questionPreview ?? '暂无问题'}</Paragraph>
+              <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{activeFeedbackEvidence?.responseRun?.answerPreview ?? '暂无回答'}</Paragraph>
             </Card>
             <Card size="small" title="关联会话">
-              {(activeFeedbackDetail.evidence?.sessionMessages ?? []).length === 0 ? <Empty description="暂无会话消息" /> : (
+              {activeFeedbackSessionMessages.length === 0 ? <Empty description="暂无会话消息" /> : (
                 <List
                   size="small"
-                  dataSource={activeFeedbackDetail.evidence.sessionMessages}
+                  dataSource={activeFeedbackSessionMessages}
                   renderItem={(msg: any) => <List.Item><Tag>{msg.role}</Tag><Text>{typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}</Text></List.Item>}
                 />
               )}
             </Card>
             <Card size="small" title="检索证据">
-              {(activeFeedbackDetail.evidence?.retrievalLogs ?? []).length === 0 ? <Empty description="暂无检索证据" /> : (
+              {activeFeedbackRetrievalLogs.length === 0 ? <Empty description="暂无检索证据" /> : (
                 <List
                   size="small"
-                  dataSource={activeFeedbackDetail.evidence.retrievalLogs}
+                  dataSource={activeFeedbackRetrievalLogs}
                   renderItem={(log: RetrievalLog) => (
                     <List.Item>
                       <List.Item.Meta
@@ -1572,6 +1887,15 @@ export default function WikiPage() {
                 />
               )}
             </Card>
+            <Card size="small" title="处理判断">
+              <Space wrap>
+                <Button onClick={() => updateFeedback(activeFeedbackDetail.item, { status: 'triaged', classification: 'retrieval_issue' }, '已标记为检索问题')}>检索问题</Button>
+                <Button onClick={() => updateFeedback(activeFeedbackDetail.item, { status: 'triaged', classification: 'model_or_tool_issue' }, '已标记为模型/工具问题')}>模型/工具问题</Button>
+                <Button disabled={!activeFeedbackDetail.item.responseRunId} onClick={() => createAnnotationFromFeedback(activeFeedbackDetail.item)}>创建标注答案</Button>
+                <Button disabled={!activeFeedbackDetail.item.responseRunId} type="primary" onClick={() => createDraftFromFeedback(activeFeedbackDetail.item)}>转 Wiki 草稿</Button>
+                <Button danger onClick={() => ignoreFeedback(activeFeedbackDetail.item)}>忽略</Button>
+              </Space>
+            </Card>
           </Space>
         )}
       </Modal>
@@ -1579,7 +1903,7 @@ export default function WikiPage() {
       <Modal
         title="草稿详情"
         open={draftDetailOpen}
-        width={920}
+        width={1200}
         onCancel={() => { setDraftDetailOpen(false); setActiveDraft(null); setActiveDraftDiff(null) }}
         footer={[
           <Button key="save" onClick={saveDraftDetail}>保存</Button>,
@@ -1588,8 +1912,58 @@ export default function WikiPage() {
         ]}
       >
         {activeDraft && (
-          <Row gutter={16}>
-            <Col xs={24} xl={10}>
+          <Row gutter={[16, 16]}>
+            <Col xs={24} xl={7}>
+              <Space direction="vertical" style={{ width: '100%' }} size={12}>
+                <Card size="small" title="来源证据">
+                  <Descriptions size="small" column={1}>
+                    <Descriptions.Item label="来源">{sourceTypeLabel(activeDraft.sourceType)}</Descriptions.Item>
+                    <Descriptions.Item label="引用">{activeDraft.sourceRef || '无'}</Descriptions.Item>
+                    <Descriptions.Item label="状态">{statusLabel(activeDraft.status)}</Descriptions.Item>
+                    <Descriptions.Item label="创建时间">{formatTime(activeDraft.createdAt)}</Descriptions.Item>
+                  </Descriptions>
+                </Card>
+                {activeDraftFeedback ? (
+                  <Card size="small" title="关联反馈">
+                    <Space direction="vertical" style={{ width: '100%' }} size={8}>
+                      <Space wrap>
+                        <Tag color={activeDraftFeedback.feedbackType === 2 ? 'red' : 'default'}>{feedbackTypeLabel(activeDraftFeedback.feedbackType)}</Tag>
+                        <Tag>{feedbackStatusLabel(activeDraftFeedback.status)}</Tag>
+                        <Tag color="blue">{feedbackClassificationLabel(activeDraftFeedback.classification)}</Tag>
+                      </Space>
+                      <Text type="secondary">原因：{activeDraftFeedback.inaccurateReasons?.map(inaccurateReasonLabel).join('、') || '无'}</Text>
+                      {activeDraftFeedback.content && <Paragraph style={{ marginBottom: 0 }}>{activeDraftFeedback.content}</Paragraph>}
+                      <Divider style={{ margin: '8px 0' }} />
+                      <Text strong>原问题</Text>
+                      <Paragraph style={{ marginBottom: 0 }}>{activeDraftEvidence?.responseRun?.questionPreview ?? activeDraftFeedback.responseRun?.questionPreview ?? '暂无问题'}</Paragraph>
+                      <Text strong>原回答</Text>
+                      <Paragraph style={{ whiteSpace: 'pre-wrap', maxHeight: 160, overflow: 'auto', marginBottom: 0 }}>
+                        {activeDraftEvidence?.responseRun?.answerPreview ?? activeDraftFeedback.responseRun?.answerPreview ?? '暂无回答'}
+                      </Paragraph>
+                    </Space>
+                  </Card>
+                ) : (
+                  <Alert type="info" showIcon message="非反馈来源草稿" description="此草稿没有关联用户反馈，审核时主要参考来源引用和草稿内容。" />
+                )}
+                {activeDraftRetrievalLogs.length > 0 && (
+                  <Card size="small" title="检索证据">
+                    <List
+                      size="small"
+                      dataSource={activeDraftRetrievalLogs}
+                      renderItem={(log: RetrievalLog) => (
+                        <List.Item>
+                          <List.Item.Meta
+                            title={<Space><Tag>{policyLabel(log.policy)}</Tag><Text>{log.query}</Text></Space>}
+                            description={<Space wrap><Tag>{log.hitCount} 命中</Tag>{log.hitPaths.map((path) => <Tag key={path}>{path}</Tag>)}</Space>}
+                          />
+                        </List.Item>
+                      )}
+                    />
+                  </Card>
+                )}
+              </Space>
+            </Col>
+            <Col xs={24} xl={8}>
               <Form form={draftEditForm} layout="vertical">
                 <Form.Item name="targetPath" label="目标页面" rules={[{ required: true }]}>
                   <Input />
@@ -1614,13 +1988,8 @@ export default function WikiPage() {
                   <Input.TextArea rows={14} />
                 </Form.Item>
               </Form>
-              <Descriptions size="small" column={1}>
-                <Descriptions.Item label="来源">{sourceTypeLabel(activeDraft.sourceType)}{activeDraft.sourceRef ? ` / ${activeDraft.sourceRef}` : ''}</Descriptions.Item>
-                <Descriptions.Item label="状态">{statusLabel(activeDraft.status)}</Descriptions.Item>
-                <Descriptions.Item label="创建时间">{formatTime(activeDraft.createdAt)}</Descriptions.Item>
-              </Descriptions>
             </Col>
-            <Col xs={24} xl={14}>
+            <Col xs={24} xl={9}>
               <Space direction="vertical" style={{ width: '100%' }} size={12}>
                 {activeDraftDiff?.error && <Alert type="error" showIcon message={wikiErrorText(activeDraftDiff.error, '差异预览失败')} />}
                 <Card size="small" title={`差异预览：${strategyLabel(activeDraftStrategy)}`}>

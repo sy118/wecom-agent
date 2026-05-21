@@ -692,6 +692,31 @@ code {
     margin: 10px 0 10px 10px;
   }
 
+  .app-sider.ant-layout-sider-collapsed {
+    min-width: 72px !important;
+    max-width: 72px !important;
+    flex: 0 0 72px !important;
+    width: 72px !important;
+  }
+
+  .app-sider.ant-layout-sider-collapsed .app-brand {
+    justify-content: center;
+    padding: 14px 8px 10px;
+  }
+
+  .app-sider.ant-layout-sider-collapsed .brand-title,
+  .app-sider.ant-layout-sider-collapsed .brand-subtitle,
+  .app-sider.ant-layout-sider-collapsed .ant-menu-title-content {
+    display: none;
+  }
+
+  .app-sider.ant-layout-sider-collapsed .ant-menu-item {
+    display: flex;
+    justify-content: center;
+    width: 48px;
+    padding-inline: 0 !important;
+  }
+
   .app-header {
     padding: 0 14px;
   }
