@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, normalize } from 'node:path'
 import type { AddressInfo } from 'node:net'
 import type { Server } from 'node:http'
 import test, { after, before } from 'node:test'
@@ -9,7 +9,8 @@ import express from 'express'
 import { simpleGit } from 'simple-git'
 
 const tempDir = await mkdtemp(join(tmpdir(), 'wecom-api-wiki-'))
-const wikiRoot = join(tempDir, 'wiki')
+const parentRepoRoot = join(tempDir, 'repo')
+const wikiRoot = join(parentRepoRoot, 'apps', 'api', 'data', 'wiki')
 process.env.DB_PATH = join(tempDir, 'wiki-test.db')
 process.env.WIKI_ROOT = wikiRoot
 process.env.WIKI_MCP_URL = 'http://127.0.0.1:1'
@@ -34,14 +35,17 @@ let server: Server
 let baseUrl = ''
 
 before(async () => {
+  await mkdir(parentRepoRoot, { recursive: true })
+  const parentGit = simpleGit(parentRepoRoot)
+  await parentGit.init()
+  await parentGit.addConfig('user.email', 'test@example.invalid')
+  await parentGit.addConfig('user.name', 'Test User')
+  await writeFile(join(parentRepoRoot, '.gitignore'), 'data/\n')
+  await parentGit.add('.gitignore')
+  await parentGit.commit('init parent repo')
+
   await mkdir(wikiRoot, { recursive: true })
-  const git = simpleGit(wikiRoot)
-  await git.init()
-  await git.addConfig('user.email', 'test@example.invalid')
-  await git.addConfig('user.name', 'Test User')
   await writeFile(join(wikiRoot, 'README.md'), '# Wiki\n')
-  await git.add('.')
-  await git.commit('init')
 
   await initDb()
   const app = express()
@@ -256,6 +260,8 @@ test('Wiki API searches, previews, checks health, binds contexts, and reviews dr
   const approvedFile = await requestJson('/api/wiki/product/files/faq/new-answer.md')
   assert.equal(approvedFile.response.status, 200)
   assert.match(approvedFile.body.content, /edited reviewed answer/)
+  const wikiGit = simpleGit(wikiRoot)
+  assert.equal(normalize(await wikiGit.revparse(['--show-toplevel'])), normalize(wikiRoot))
 
   const createOnlyDraft = await requestJson('/api/wiki/product/drafts', {
     method: 'POST',

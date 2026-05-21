@@ -52,7 +52,7 @@ export default function AppLayout() {
           <span />
         </div>
         <Layout className="app-layout">
-          <Sider className="app-sider" theme="light" width={220}>
+          <Sider className="app-sider" theme="light" width={220} breakpoint="md" collapsedWidth={72}>
             <div className="app-brand">
               <div className="brand-icon"><RobotOutlined /></div>
               <div>

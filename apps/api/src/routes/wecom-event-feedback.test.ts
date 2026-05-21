@@ -186,6 +186,16 @@ test('WeCom feedback event links response run, drafts Wiki knowledge, and create
   assert.equal(draft.response.status, 201)
   assert.equal(draft.body.sourceRef, `feedback:${first.feedbackItem!.id};run:${run.id}`)
 
+  const draftedList = await requestJson('/api/wiki/feedback-product/feedback?status=drafted')
+  assert.equal(draftedList.response.status, 200)
+  assert.equal(draftedList.body.items.length, 1)
+  assert.equal(draftedList.body.items[0].draftId, draft.body.id)
+
+  const draftedMetrics = await requestJson('/api/wiki/feedback-product/feedback/metrics')
+  assert.equal(draftedMetrics.response.status, 200)
+  assert.equal(draftedMetrics.body.metrics.drafted, 1)
+  assert.equal(draftedMetrics.body.metrics.pending, 0)
+
   const approved = await requestJson(`/api/wiki/feedback-product/drafts/${draft.body.id}/approve`, {
     method: 'POST',
     body: JSON.stringify({ reviewedBy: 'tester' }),
@@ -194,6 +204,11 @@ test('WeCom feedback event links response run, drafts Wiki knowledge, and create
 
   const resolved = await WikiFeedbackRepository.findById(first.feedbackItem!.id)
   assert.equal(resolved?.status, 'resolved')
+
+  const resolvedMetrics = await requestJson('/api/wiki/feedback-product/feedback/metrics')
+  assert.equal(resolvedMetrics.response.status, 200)
+  assert.equal(resolvedMetrics.body.metrics.drafted, 0)
+  assert.equal(resolvedMetrics.body.metrics.pending, 0)
 
   const annotation = await requestJson(`/api/wiki/feedback-product/annotation-answers/from-feedback/${first.feedbackItem!.id}`, {
     method: 'POST',
