@@ -1,11 +1,9 @@
 ## 目的
 
 定义 Bot 级别 MCP 工具池的构建、Context 级参数配置、强制调用和 per-invoke 工具过滤规范，以及 AgentEngine 动态工具列表支持。
-
 ## 需求
-
 ### 需求:Bot 启动时构建工具池
-Bot 启动时必须连接所有已启用的 MCP 服务器，将加载的工具按 mcpServerId 分组存入工具池，供后续 invoke 按需过滤。
+Bot 启动时必须连接所有已启用的 MCP 服务器，包括 SSE、stdio 和 Streamable HTTP 传输类型，将加载的工具按 mcpServerId 分组存入工具池，供后续 invoke 按需过滤。
 
 #### 场景:正常启动加载工具池
 - **当** Bot 启动（BotManager.start 调用）
@@ -130,3 +128,27 @@ McpConfig 必须支持可选的 `forceCall` 布尔字段。当 `forceCall` 为 `
 - **当** Dify Bot 的 Context 中存在 `skillConfigs`
 - **那么** 系统必须忽略这些配置的运行时工具加载
 - **并且** 管理控制台必须提示工具由 Dify 内部处理
+
+### 需求:Bot 工具池支持 stdio MCP Server
+Bot 启动或刷新 MCP 工具池时，必须同时支持从 enabled=true 的 SSE、stdio 和 Streamable HTTP MCP Server 加载工具。
+
+#### 场景:工具池包含 stdio MCP 工具
+- **当** Bot 启动时存在 enabled=true 的 stdio MCP Server
+- **并且** 该 Server 成功返回工具列表
+- **那么** BotInstance 必须将这些工具按该 mcpServerId 分组存入工具池
+
+#### 场景:stdio MCP Server 失败不阻断工具池
+- **当** 某个 stdio MCP Server 无法启动或无法加载工具
+- **那么** 系统必须记录错误日志，跳过该服务器
+- **并且** 继续加载其他 SSE、stdio 或 Streamable HTTP MCP Server
+
+#### 场景:工具池包含 Streamable HTTP MCP 工具
+- **当** Bot 启动时存在 enabled=true 的 Streamable HTTP MCP Server
+- **并且** 该 Server 成功返回工具列表
+- **那么** BotInstance 必须将这些工具按该 mcpServerId 分组存入工具池
+
+#### 场景:Streamable HTTP MCP Server 失败不阻断工具池
+- **当** 某个 Streamable HTTP MCP Server 无法连接或无法加载工具
+- **那么** 系统必须记录错误日志，跳过该服务器
+- **并且** 继续加载其他 SSE、stdio 或 Streamable HTTP MCP Server
+
