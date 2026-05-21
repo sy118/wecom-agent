@@ -1,6 +1,6 @@
 import { randomUUID, createDecipheriv } from 'crypto'
 import { WSClient, MessageType } from '@wecom/aibot-node-sdk'
-import type { IMAdapter, IncomingMessage, IncomingContent } from '@wecom-platform/types'
+import type { IMAdapter, IncomingMessage, IncomingContent, IncomingEvent } from '@wecom-platform/types'
 
 export interface WecomCredentials {
   botId: string
@@ -53,11 +53,13 @@ export async function decryptWecomImage(url: string, aeskey: string): Promise<st
 export class WecomAdapter implements IMAdapter {
   private client: WSClient
   private messageHandler: ((msg: IncomingMessage) => Promise<void>) | null = null
+  private eventHandler: ((event: IncomingEvent) => Promise<void>) | null = null
   private stopped = false
   private reconnectAttempts = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private reconnecting = false
   private listenersAttached = false
+  private processedEventIds = new Set<string>()
   // streamId → frame mapping for editMessage (stream-based update)
   private pendingFrames = new Map<string, any>()
 
@@ -90,6 +92,10 @@ export class WecomAdapter implements IMAdapter {
     this.messageHandler = handler
   }
 
+  onEvent(handler: (event: IncomingEvent) => Promise<void>): void {
+    this.eventHandler = handler
+  }
+
   isReconnecting(): boolean {
     return this.reconnecting
   }
@@ -103,9 +109,9 @@ export class WecomAdapter implements IMAdapter {
    * with editMessage to update the message content via WeCom stream protocol.
    * Requires the original frame — only usable from within a message handler context.
    */
-  async sendThinkingWithStream(frame: any, text: string): Promise<string> {
+  async sendThinkingWithStream(frame: any, text: string, feedbackId?: string | null): Promise<string> {
     const streamId = randomUUID()
-    await this.client.replyStream(frame, streamId, text, false)
+    await this.client.replyStream(frame, streamId, text, false, undefined, feedbackId ? { id: feedbackId } : undefined)
     this.pendingFrames.set(streamId, frame)
     return streamId
   }
@@ -145,8 +151,11 @@ export class WecomAdapter implements IMAdapter {
     }
 
     this.client.on('message', async (frame: any) => {
-      if (frame?.body?.msgtype === 'event' && frame?.body?.event?.eventtype === 'disconnected_event') {
-        handleDisconnectedEvent()
+      if (frame?.body?.msgtype === 'event') {
+        if (frame?.body?.event?.eventtype === 'disconnected_event') {
+          handleDisconnectedEvent()
+        }
+        await this.handleEventFrame(frame)
         return
       }
 
@@ -155,7 +164,17 @@ export class WecomAdapter implements IMAdapter {
       if (msg) await this.messageHandler(msg)
     })
 
-    this.client.on('event.disconnected_event', handleDisconnectedEvent)
+    this.client.on('event', async (frame: any) => {
+      if (frame?.body?.event?.eventtype === 'disconnected_event') {
+        handleDisconnectedEvent()
+      }
+      await this.handleEventFrame(frame)
+    })
+
+    this.client.on('event.disconnected_event', async (frame: any) => {
+      handleDisconnectedEvent()
+      await this.handleEventFrame(frame)
+    })
 
     this.client.on('connected', () => {
       console.log(`[WecomAdapter:${this.credentials.botId}] Connected`)
@@ -201,6 +220,23 @@ export class WecomAdapter implements IMAdapter {
     return this.parseFrame(frame)
   }
 
+  async __testParseEventFrame(frame: any): Promise<IncomingEvent | null> {
+    return this.parseEventFrame(frame)
+  }
+
+  private async handleEventFrame(frame: any): Promise<void> {
+    if (!this.eventHandler) return
+    const event = await this.parseEventFrame(frame)
+    if (!event) return
+    if (this.processedEventIds.has(event.msgId)) return
+    this.processedEventIds.add(event.msgId)
+    if (this.processedEventIds.size > 1000) {
+      const first = this.processedEventIds.values().next().value
+      if (first) this.processedEventIds.delete(first)
+    }
+    await this.eventHandler(event)
+  }
+
   private async parseFrame(frame: any): Promise<IncomingMessage | null> {
     const { body } = frame
     if (!body?.msgid) return null
@@ -214,6 +250,11 @@ export class WecomAdapter implements IMAdapter {
     const content = await this.parseContent(body, chatType)
 
     return { chatId, chatKey, chatType, userId, content, rawBody: body, _frame: frame } as any
+  }
+
+  private async parseEventFrame(frame: any): Promise<IncomingEvent | null> {
+    const { body } = frame
+    return parseWecomEventBody(body)
   }
 
   private async parseQuote(quote: QuoteBody | undefined, chatType: 'single' | 'group'): Promise<IncomingContent[]> {
@@ -285,4 +326,25 @@ export class WecomAdapter implements IMAdapter {
 export function resolveChatKey(body: any): string {
   if (body.chatid) return `wecom:group:${body.chatid}`
   return `wecom:user:${body.from?.userid ?? 'unknown'}`
+}
+
+export function parseWecomEventBody(body: any): IncomingEvent | null {
+  if (!body?.msgid || body.msgtype !== 'event') return null
+  const eventPayload = body.event && typeof body.event === 'object' ? body.event : {}
+  const eventType = String(eventPayload.eventtype ?? body.eventtype ?? 'unknown')
+  const chatType: 'single' | 'group' = body.chattype === 'group' ? 'group' : 'single'
+  return {
+    msgId: String(body.msgid),
+    eventType,
+    aibotId: body.aibotid ? String(body.aibotid) : null,
+    chatId: body.chatid ? String(body.chatid) : body.from?.userid ? String(body.from.userid) : null,
+    chatKey: resolveChatKey(body),
+    chatType,
+    userId: body.from?.userid ? String(body.from.userid) : 'unknown',
+    corpid: body.from?.corpid ? String(body.from.corpid) : null,
+    responseUrl: body.response_url ? String(body.response_url) : null,
+    createTime: body.create_time === undefined || body.create_time === null ? null : Number(body.create_time),
+    eventPayload,
+    rawBody: body,
+  }
 }

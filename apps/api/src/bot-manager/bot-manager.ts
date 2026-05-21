@@ -88,6 +88,14 @@ export class BotManager extends EventEmitter {
     this.instances.get(botId)?.addBinding(chatKey, contextId)
   }
 
+  removeBinding(botId: string, chatKey: string): void {
+    this.instances.get(botId)?.removeBinding(chatKey)
+  }
+
+  updateBinding(botId: string, chatKey: string, contextId: string): void {
+    this.instances.get(botId)?.updateBinding(chatKey, contextId)
+  }
+
   upsertContext(botId: string, context: ContextConfig): void {
     this.instances.get(botId)?.upsertContext(context)
   }

@@ -11,14 +11,18 @@ import type { SkillDefinition } from '@wecom-platform/types'
 const tempDir = await mkdtemp(join(tmpdir(), 'wecom-api-skill-'))
 process.env.DB_PATH = join(tempDir, 'api-test.db')
 process.env.SKILL_STORAGE_ROOT = join(tempDir, 'skills')
+process.env.DEFAULT_SESSION_TTL_MIN = '45'
 
-const [{ db, initDb }, { BotRepository }, { SkillRepository }, { SkillAuditRepository }, { skillsRouter }, { contextsRouter }] = await Promise.all([
+const [{ db, initDb }, { BotRepository }, { SkillRepository }, { SkillAuditRepository }, { BindingRepository }, { skillsRouter }, { contextsRouter }, { bindingsRouter }, { settingsRouter }] = await Promise.all([
   import('../db/client.js'),
   import('../db/bot-repository.js'),
   import('../db/skill-repository.js'),
   import('../db/skill-audit-repository.js'),
+  import('../db/binding-repository.js'),
   import('./skills.js'),
   import('./contexts.js'),
+  import('./bindings.js'),
+  import('./settings.js'),
 ])
 
 let server: Server
@@ -29,7 +33,9 @@ before(async () => {
   const app = express()
   app.use(express.json())
   app.use('/api/skills', skillsRouter)
+  app.use('/api/settings', settingsRouter)
   app.use('/api/bots/:botId/contexts', contextsRouter)
+  app.use('/api/bots/:botId/bindings', bindingsRouter)
   await new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => resolve())
   })
@@ -190,6 +196,26 @@ test('Skill upload API installs bundle and previews SKILL.md', async () => {
   assert.equal(deleted.response.status, 204)
 })
 
+test('Skill upload API accepts SKILL.md with BOM and leading blank lines', async () => {
+  const form = new FormData()
+  appendSkillFile(form, 'bom-skill/SKILL.md', `\uFEFF
+
+---
+name: bom-skill
+description: bom skill description
+---
+
+# BOM Skill
+`)
+
+  const created = await fetch(`${baseUrl}/api/skills/upload`, { method: 'POST', body: form })
+  const body = await created.json()
+
+  assert.equal(created.status, 201)
+  assert.equal(body.name, 'bom-skill')
+  assert.equal(body.description, 'bom skill description')
+})
+
 test('Skill upload API rejects missing SKILL.md', async () => {
   const form = new FormData()
   appendSkillFile(form, 'bad/scripts/echo.js', "process.stdout.write('ok')\n")
@@ -199,6 +225,192 @@ test('Skill upload API rejects missing SKILL.md', async () => {
 
   assert.equal(response.status, 400)
   assert.match(body.error, /SKILL\.md/)
+})
+
+test('Settings API edits platform default session TTL for future contexts only', async () => {
+  const initial = await requestJson('/api/settings')
+  assert.equal(initial.response.status, 200)
+  assert.equal(initial.body.defaultSessionTtlMin, 45)
+
+  const invalidValues = [0, 1441, 10.5, '30']
+  for (const defaultSessionTtlMin of invalidValues) {
+    const invalid = await requestJson('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify({ defaultSessionTtlMin }),
+    })
+    assert.equal(invalid.response.status, 400)
+  }
+
+  const updatedDefault = await requestJson('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ defaultSessionTtlMin: 60 }),
+  })
+  assert.equal(updatedDefault.response.status, 200)
+  assert.equal(updatedDefault.body.defaultSessionTtlMin, 60)
+
+  const persisted = await requestJson('/api/settings')
+  assert.equal(persisted.body.defaultSessionTtlMin, 60)
+
+  const bot = await createBot('settings-default-ttl-bot')
+  const omitted = await requestJson(`/api/bots/${bot.id}/contexts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Omitted TTL after setting update',
+      systemPrompt: 'Base',
+      mcpConfigs: [],
+      skillConfigs: [],
+      isDefault: false,
+    }),
+  })
+  assert.equal(omitted.response.status, 201)
+  assert.equal(omitted.body.sessionTtlMin, 60)
+
+  const explicit = await requestJson(`/api/bots/${bot.id}/contexts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Explicit TTL after setting update',
+      systemPrompt: 'Base',
+      mcpConfigs: [],
+      skillConfigs: [],
+      sessionTtlMin: 12,
+      isDefault: false,
+    }),
+  })
+  assert.equal(explicit.response.status, 201)
+  assert.equal(explicit.body.sessionTtlMin, 12)
+
+  await requestJson('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ defaultSessionTtlMin: 90 }),
+  })
+  const existing = await requestJson(`/api/bots/${bot.id}/contexts/${omitted.body.id}`)
+  assert.equal(existing.body.sessionTtlMin, 60)
+})
+
+test('Context API uses configured default session TTL only when omitted', async () => {
+  await requestJson('/api/settings', {
+    method: 'PUT',
+    body: JSON.stringify({ defaultSessionTtlMin: 45 }),
+  })
+  const bot = await createBot('default-ttl-bot')
+
+  const defaults = await requestJson(`/api/bots/${bot.id}/contexts/defaults`)
+  assert.equal(defaults.response.status, 200)
+  assert.equal(defaults.body.sessionTtlMin, 45)
+
+  const omitted = await requestJson(`/api/bots/${bot.id}/contexts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Omitted TTL',
+      systemPrompt: 'Base',
+      mcpConfigs: [],
+      skillConfigs: [],
+      isDefault: false,
+    }),
+  })
+  assert.equal(omitted.response.status, 201)
+  assert.equal(omitted.body.sessionTtlMin, 45)
+
+  const explicit = await requestJson(`/api/bots/${bot.id}/contexts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Explicit TTL',
+      systemPrompt: 'Base',
+      mcpConfigs: [],
+      skillConfigs: [],
+      sessionTtlMin: 12,
+      isDefault: false,
+    }),
+  })
+  assert.equal(explicit.response.status, 201)
+  assert.equal(explicit.body.sessionTtlMin, 12)
+
+  const invalid = await requestJson(`/api/bots/${bot.id}/contexts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Invalid TTL',
+      systemPrompt: 'Base',
+      mcpConfigs: [],
+      skillConfigs: [],
+      sessionTtlMin: 0,
+      isDefault: false,
+    }),
+  })
+  assert.equal(invalid.response.status, 400)
+})
+
+test('Binding API edits mutable fields and rejects chatKey changes', async () => {
+  const bot = await createBot('binding-edit-bot')
+  const firstContext = await requestJson(`/api/bots/${bot.id}/contexts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'First Context',
+      systemPrompt: 'Base',
+      mcpConfigs: [],
+      skillConfigs: [],
+      sessionTtlMin: 30,
+      isDefault: false,
+    }),
+  })
+  const secondContext = await requestJson(`/api/bots/${bot.id}/contexts`, {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'Second Context',
+      systemPrompt: 'Base',
+      mcpConfigs: [],
+      skillConfigs: [],
+      sessionTtlMin: 30,
+      isDefault: false,
+    }),
+  })
+  const created = await requestJson(`/api/bots/${bot.id}/bindings`, {
+    method: 'POST',
+    body: JSON.stringify({
+      chatKey: 'wecom:group:edit-me',
+      chatName: 'Before',
+      chatType: 'group',
+      contextId: firstContext.body.id,
+    }),
+  })
+  assert.equal(created.response.status, 201)
+
+  const updated = await requestJson(`/api/bots/${bot.id}/bindings/${created.body.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      chatKey: created.body.chatKey,
+      chatName: 'After',
+      chatType: 'user',
+      contextId: secondContext.body.id,
+    }),
+  })
+  assert.equal(updated.response.status, 200)
+  assert.equal(updated.body.chatKey, 'wecom:group:edit-me')
+  assert.equal(updated.body.chatName, 'After')
+  assert.equal(updated.body.chatType, 'user')
+  assert.equal(updated.body.contextId, secondContext.body.id)
+
+  const rejectedChatKey = await requestJson(`/api/bots/${bot.id}/bindings/${created.body.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      chatKey: 'wecom:group:changed',
+      chatName: 'After',
+      chatType: 'group',
+      contextId: secondContext.body.id,
+    }),
+  })
+  assert.equal(rejectedChatKey.response.status, 400)
+
+  const rejectedContext = await requestJson(`/api/bots/${bot.id}/bindings/${created.body.id}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      chatName: 'After',
+      chatType: 'group',
+      contextId: 'missing-context',
+    }),
+  })
+  assert.equal(rejectedContext.response.status, 400)
+
+  assert.equal((await BindingRepository.findById(bot.id, created.body.id))?.chatKey, 'wecom:group:edit-me')
 })
 
 test('Context API accepts global skillConfigs and masks sensitive params in responses', async () => {

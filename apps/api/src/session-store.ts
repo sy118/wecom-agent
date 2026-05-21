@@ -44,7 +44,7 @@ export class SessionStore {
       })
 
       const msgResult = await this.db.execute({
-        sql: 'SELECT role, content, timestamp FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC',
+        sql: 'SELECT role, content, timestamp, response_run_id FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC',
         args: [sessionId],
       })
 
@@ -52,9 +52,11 @@ export class SessionStore {
         role: r.role as 'human' | 'ai',
         content: deserializeContent(r.content as string),
         timestamp: r.timestamp as number,
+        responseRunId: (r.response_run_id as string | null) ?? null,
       }))
 
       return {
+        id: sessionId,
         chatKey,
         contextId: row.context_id as string,
         messages,
@@ -72,10 +74,10 @@ export class SessionStore {
       args: [sessionId, this.botId, chatKey, contextId, now, expiresAt],
     })
 
-    return { chatKey, contextId, messages: [], lastActiveAt: now, expiresAt }
+    return { id: sessionId, chatKey, contextId, messages: [], lastActiveAt: now, expiresAt }
   }
 
-  async addMessage(chatKey: string, message: SessionMessage): Promise<void> {
+  async addMessage(chatKey: string, message: SessionMessage, responseRunId?: string | null): Promise<void> {
     const now = Date.now()
     const sessionResult = await this.db.execute({
       sql: 'SELECT id FROM sessions WHERE bot_id = ? AND chat_key = ? AND expires_at > ?',
@@ -86,8 +88,8 @@ export class SessionStore {
     const sessionId = sessionResult.rows[0].id as string
 
     await this.db.execute({
-      sql: 'INSERT INTO session_messages (id, session_id, role, content, timestamp) VALUES (?, ?, ?, ?, ?)',
-      args: [randomUUID(), sessionId, message.role, serializeContent(message.content), message.timestamp],
+      sql: 'INSERT INTO session_messages (id, session_id, role, content, timestamp, response_run_id) VALUES (?, ?, ?, ?, ?, ?)',
+      args: [randomUUID(), sessionId, message.role, serializeContent(message.content), message.timestamp, responseRunId ?? message.responseRunId ?? null],
     })
 
     const countResult = await this.db.execute({
@@ -134,16 +136,18 @@ export class SessionStore {
     const sessions: Session[] = []
     for (const row of sessionResult.rows) {
       const msgResult = await this.db.execute({
-        sql: 'SELECT role, content, timestamp FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC',
+        sql: 'SELECT role, content, timestamp, response_run_id FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC',
         args: [row.id as string],
       })
       sessions.push({
+        id: row.id as string,
         chatKey: row.chat_key as string,
         contextId: row.context_id as string,
         messages: msgResult.rows.map((r) => ({
           role: r.role as 'human' | 'ai',
           content: deserializeContent(r.content as string),
           timestamp: r.timestamp as number,
+          responseRunId: (r.response_run_id as string | null) ?? null,
         })),
         difyConversationId: (row.dify_conversation_id as string | null) ?? undefined,
         lastActiveAt: row.last_active_at as number,
@@ -156,6 +160,19 @@ export class SessionStore {
   async get(chatKey: string): Promise<Session | undefined> {
     const all = await this.getAll()
     return all.find((s) => s.chatKey === chatKey)
+  }
+
+  async getMessagesByResponseRunId(responseRunId: string): Promise<SessionMessage[]> {
+    const result = await this.db.execute({
+      sql: 'SELECT role, content, timestamp, response_run_id FROM session_messages WHERE response_run_id = ? ORDER BY timestamp ASC',
+      args: [responseRunId],
+    })
+    return result.rows.map((r) => ({
+      role: r.role as 'human' | 'ai',
+      content: deserializeContent(r.content as string),
+      timestamp: r.timestamp as number,
+      responseRunId: (r.response_run_id as string | null) ?? null,
+    }))
   }
 
   private async cleanup(): Promise<void> {

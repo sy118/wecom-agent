@@ -13,10 +13,14 @@ const [
   botInstanceModule,
   { db, initDb },
   { WikiRetrievalLogRepository },
+  { BotRepository },
+  { BotResponseRunRepository },
 ] = await Promise.all([
   import('./bot-instance.js'),
   import('../db/client.js'),
   import('../db/wiki-retrieval-log-repository.js'),
+  import('../db/bot-repository.js'),
+  import('../db/bot-response-run-repository.js'),
 ])
 
 const {
@@ -107,6 +111,54 @@ function makeInstance(skills: SkillDefinition[] = []) {
     skills,
     db: db as any,
   })
+}
+
+function makeInstanceForBot(bot: BotConfig, contexts: ContextConfig[] = []) {
+  return new BotInstance({
+    bot,
+    contexts,
+    bindings: [],
+    mcpServers: [],
+    skills: [],
+    db: db as any,
+  })
+}
+
+async function makePersistedBot(overrides: Partial<Omit<BotConfig, 'id' | 'status' | 'createdAt' | 'updatedAt'>> = {}) {
+  const suffix = `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return BotRepository.create({
+    name: `Bot ${suffix}`,
+    wecomBotId: `wecom-${suffix}`,
+    wecomBotSecret: 'wecom-secret',
+    wecomWsUrl: 'wss://example.invalid/ws',
+    llmApiKey: 'llm-key',
+    llmBaseUrl: 'https://llm.example.invalid/v1',
+    llmModel: 'test-model',
+    provider: 'openai-compatible',
+    streamingMode: 'none',
+    difyBaseUrl: null,
+    difyApiKey: null,
+    difyAppId: null,
+    visionEnabled: false,
+    ...overrides,
+  })
+}
+
+function makeFakeAdapter() {
+  const sent: Array<{ chatId: string; text: string }> = []
+  const streams: Array<{ text: string; feedbackId?: string | null; finish?: boolean }> = []
+  return {
+    sent,
+    streams,
+    sendMessage: async (chatId: string, text: string) => { sent.push({ chatId, text }) },
+    sendThinkingWithStream: async (_frame: any, text: string, feedbackId?: string | null) => {
+      streams.push({ text, feedbackId, finish: false })
+      return `stream-${streams.length}`
+    },
+    editMessage: async (_chatId: string, _streamId: string, text: string, finish = true) => {
+      streams.push({ text, finish })
+    },
+  }
 }
 
 function makeContext(overrides: Partial<ContextConfig> = {}): ContextConfig {
@@ -290,6 +342,22 @@ test('BotInstance reloads runtime Skills and removes disabled entries', async ()
   }
 })
 
+test('BotInstance updates and removes individual runtime bindings', () => {
+  const instance = makeInstance()
+  try {
+    instance.addBinding('wecom:group:runtime', 'context-1')
+    assert.equal((instance as any).bindingMap.get('wecom:group:runtime'), 'context-1')
+
+    instance.updateBinding('wecom:group:runtime', 'context-2')
+    assert.equal((instance as any).bindingMap.get('wecom:group:runtime'), 'context-2')
+
+    instance.removeBinding('wecom:group:runtime')
+    assert.equal((instance as any).bindingMap.has('wecom:group:runtime'), false)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
 test('BotInstance reloads MCP server pools and drops removed servers', async () => {
   const instance = makeInstance()
   try {
@@ -298,6 +366,156 @@ test('BotInstance reloads MCP server pools and drops removed servers', async () 
     await instance.reloadMcpServers([makeMcpServer({ id: 'disabled-mcp', enabled: false })])
 
     assert.equal((instance as any).toolPool.size, 0)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance records normal replies on the current response run', async () => {
+  const bot = await makePersistedBot()
+  const context = makeContext({ id: 'reply-context', botId: bot.id })
+  const instance = makeInstanceForBot(bot, [context])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = adapter
+    ;(instance as any).engine = { invokeWithTools: async () => 'tracked answer' }
+    const chatKey = `wecom:user:normal-${Date.now()}`
+    await (instance as any).sessions.getOrCreate(chatKey, context.id, 30)
+    const run = await BotResponseRunRepository.create({
+      feedbackId: 'feedback-normal-reply',
+      botId: bot.id,
+      contextId: context.id,
+      sessionId: 'session-normal',
+      chatKey,
+      chatId: 'user-normal',
+      userId: 'user-normal',
+      questionPreview: 'question',
+      provider: bot.provider,
+      model: bot.llmModel,
+    })
+
+    await (instance as any).handleNone('user-normal', chatKey, 'question', [], 'prompt', [], { body: {} }, run)
+
+    const updated = await BotResponseRunRepository.findById(run.id)
+    const messages = await (instance as any).sessions.getMessagesByResponseRunId(run.id)
+    assert.equal(updated?.status, 'sent')
+    assert.equal(updated?.answerPreview, 'tracked answer')
+    assert.equal(updated?.feedbackAvailable, true)
+    assert.deepEqual(messages.map((msg: any) => msg.responseRunId), [run.id, run.id])
+    assert.equal(adapter.streams[0].feedbackId, run.feedbackId)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance records typewriter replies on one response run', async () => {
+  const bot = await makePersistedBot({ streamingMode: 'typewriter' })
+  const context = makeContext({ id: 'typewriter-context', botId: bot.id })
+  const instance = makeInstanceForBot(bot, [context])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = adapter
+    ;(instance as any).engine = {
+      invokeWithStream: async (_messages: unknown, _content: unknown, _prompt: string, _tools: unknown, callbacks: any) => {
+        await callbacks.onToken('stream ')
+        return 'stream answer'
+      },
+    }
+    const chatKey = `wecom:user:typewriter-${Date.now()}`
+    await (instance as any).sessions.getOrCreate(chatKey, context.id, 30)
+    const run = await BotResponseRunRepository.create({
+      feedbackId: 'feedback-typewriter-reply',
+      botId: bot.id,
+      contextId: context.id,
+      sessionId: 'session-typewriter',
+      chatKey,
+      chatId: 'user-typewriter',
+      userId: 'user-typewriter',
+      questionPreview: 'question',
+      provider: bot.provider,
+      model: bot.llmModel,
+    })
+
+    await (instance as any).handleTypewriter('user-typewriter', chatKey, 'question', [], 'prompt', [], { body: {} }, run)
+
+    const updated = await BotResponseRunRepository.findById(run.id)
+    assert.equal(updated?.status, 'sent')
+    assert.equal(updated?.answerPreview, 'stream answer')
+    assert.equal(adapter.streams.filter((item) => item.feedbackId === run.feedbackId).length, 1)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance records Dify conversation id on the response run', async () => {
+  const bot = await makePersistedBot({
+    provider: 'dify',
+    difyBaseUrl: 'https://dify.example.invalid',
+    difyApiKey: 'dify-key',
+    difyAppId: 'dify-app',
+  })
+  const context = makeContext({ id: 'dify-context', botId: bot.id })
+  const instance = makeInstanceForBot(bot, [context])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = adapter
+    ;(instance as any).difyClient = { chat: async () => ({ answer: 'dify answer', conversationId: 'conv-1' }) }
+    const chatKey = `wecom:user:dify-${Date.now()}`
+    await (instance as any).sessions.getOrCreate(chatKey, context.id, 30)
+    const run = await BotResponseRunRepository.create({
+      feedbackId: 'feedback-dify-reply',
+      botId: bot.id,
+      contextId: context.id,
+      sessionId: 'session-dify',
+      chatKey,
+      chatId: 'user-dify',
+      userId: 'user-dify',
+      questionPreview: 'question',
+      provider: bot.provider,
+      model: bot.difyAppId,
+    })
+
+    await (instance as any).handleDify('user-dify', chatKey, 'question', null, undefined, { body: {} }, run)
+
+    const updated = await BotResponseRunRepository.findById(run.id)
+    const session = await (instance as any).sessions.get(chatKey)
+    assert.equal(updated?.status, 'sent')
+    assert.equal(updated?.answerPreview, 'dify answer')
+    assert.equal(updated?.difyConversationId, 'conv-1')
+    assert.equal(session?.difyConversationId, 'conv-1')
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance marks response run errors when reply generation fails', async () => {
+  const bot = await makePersistedBot()
+  const context = makeContext({ id: 'error-context', botId: bot.id })
+  const instance = makeInstanceForBot(bot, [context])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = adapter
+    ;(instance as any).engine = { invokeWithTools: async () => { throw new Error('model failed') } }
+    const chatKey = `wecom:user:error-${Date.now()}`
+    await (instance as any).sessions.getOrCreate(chatKey, context.id, 30)
+    const run = await BotResponseRunRepository.create({
+      feedbackId: 'feedback-error-reply',
+      botId: bot.id,
+      contextId: context.id,
+      sessionId: 'session-error',
+      chatKey,
+      chatId: 'user-error',
+      userId: 'user-error',
+      questionPreview: 'question',
+      provider: bot.provider,
+      model: bot.llmModel,
+    })
+
+    await (instance as any).handleNone('user-error', chatKey, 'question', [], 'prompt', [], undefined, run)
+
+    const updated = await BotResponseRunRepository.findById(run.id)
+    assert.equal(updated?.status, 'error')
+    assert.match(updated?.error ?? '', /处理消息时发生错误/)
   } finally {
     ;(instance as any).sessions.destroy()
   }
@@ -324,7 +542,7 @@ test('BotInstance force-calls Wiki autoSearch policy with namespace', async () =
         forceCall: true,
         params: { namespace: 'product', retrievalPolicy: 'autoSearch' },
       },
-    ], 'refund policy')
+    ], 'refund policy', { contextId: 'context-1', chatKey: 'wecom:group:test', responseRunId: 'run-1' })
 
     assert.equal(calls.length, 1)
     assert.deepEqual(calls[0], { query: 'refund policy', namespace: 'product', cross_ns: false })
@@ -333,6 +551,7 @@ test('BotInstance force-calls Wiki autoSearch policy with namespace', async () =
     assert.equal(logs.some((log) =>
       log.policy === 'autoSearch' &&
       log.query === 'refund policy' &&
+      log.responseRunId === 'run-1' &&
       log.hitCount === 1 &&
       log.hitPaths.includes('faq/refund.md')
     ), true)

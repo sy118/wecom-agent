@@ -1,6 +1,7 @@
 import { createClient } from '@libsql/client'
 import { mkdirSync } from 'fs'
 import { dirname } from 'path'
+import { getEnvDefaultSessionTtlMin } from '../config/session-ttl.js'
 
 const DB_PATH = process.env.DB_PATH ?? './data/wecom-platform.db'
 
@@ -31,6 +32,12 @@ export async function initDb(): Promise<void> {
       vision_enabled INTEGER NOT NULL DEFAULT 0,
       status TEXT NOT NULL DEFAULT 'stopped',
       created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
       updated_at INTEGER NOT NULL
     );
 
@@ -115,7 +122,8 @@ export async function initDb(): Promise<void> {
       session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
       role TEXT NOT NULL,
       content TEXT NOT NULL,
-      timestamp INTEGER NOT NULL
+      timestamp INTEGER NOT NULL,
+      response_run_id TEXT
     );
 
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
@@ -169,6 +177,7 @@ export async function initDb(): Promise<void> {
       bot_id TEXT,
       context_id TEXT,
       chat_key TEXT,
+      response_run_id TEXT,
       namespace TEXT NOT NULL,
       policy TEXT NOT NULL,
       query TEXT NOT NULL,
@@ -179,12 +188,98 @@ export async function initDb(): Promise<void> {
       created_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS wecom_events (
+      id TEXT PRIMARY KEY,
+      msgid TEXT NOT NULL UNIQUE,
+      event_type TEXT NOT NULL,
+      bot_id TEXT,
+      aibotid TEXT,
+      chat_key TEXT,
+      chatid TEXT,
+      chattype TEXT,
+      from_userid TEXT,
+      from_corpid TEXT,
+      response_url TEXT,
+      raw_payload TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending',
+      error TEXT,
+      create_time INTEGER,
+      created_at INTEGER NOT NULL,
+      processed_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS bot_response_runs (
+      id TEXT PRIMARY KEY,
+      feedback_id TEXT UNIQUE,
+      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      context_id TEXT,
+      session_id TEXT,
+      chat_key TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      user_id TEXT,
+      question_preview TEXT,
+      answer_preview TEXT,
+      provider TEXT NOT NULL,
+      model TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      error TEXT,
+      dify_conversation_id TEXT,
+      feedback_available INTEGER NOT NULL DEFAULT 1,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS wiki_feedback_items (
+      id TEXT PRIMARY KEY,
+      event_id TEXT NOT NULL REFERENCES wecom_events(id) ON DELETE CASCADE,
+      response_run_id TEXT,
+      namespace TEXT,
+      feedback_type INTEGER,
+      content TEXT,
+      inaccurate_reasons TEXT NOT NULL DEFAULT '[]',
+      classification TEXT NOT NULL DEFAULT 'unclassified',
+      status TEXT NOT NULL DEFAULT 'new',
+      assigned_target_path TEXT,
+      draft_id TEXT,
+      resolution_note TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS annotation_answers (
+      id TEXT PRIMARY KEY,
+      question TEXT NOT NULL,
+      answer TEXT NOT NULL,
+      namespace TEXT,
+      context_id TEXT,
+      source_type TEXT NOT NULL DEFAULT 'manual',
+      source_ref TEXT,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      hit_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_namespace_created
       ON wiki_retrieval_logs(namespace, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_namespace_hit_count
       ON wiki_retrieval_logs(namespace, hit_count);
     CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_context
       ON wiki_retrieval_logs(context_id);
+    CREATE INDEX IF NOT EXISTS idx_wecom_events_event_type_created
+      ON wecom_events(event_type, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_wecom_events_bot_created
+      ON wecom_events(bot_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_bot_response_runs_feedback_id
+      ON bot_response_runs(feedback_id);
+    CREATE INDEX IF NOT EXISTS idx_bot_response_runs_chat_created
+      ON bot_response_runs(bot_id, chat_key, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_wiki_feedback_items_namespace_status
+      ON wiki_feedback_items(namespace, status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_wiki_feedback_items_response_run
+      ON wiki_feedback_items(response_run_id);
+    CREATE INDEX IF NOT EXISTS idx_annotation_answers_scope
+      ON annotation_answers(namespace, context_id, enabled);
 
     UPDATE bots SET status = 'stopped' WHERE status = 'running';
   `)
@@ -199,11 +294,27 @@ export async function initDb(): Promise<void> {
   await addColumnIfMissing('skills', 'resource_index_json', "TEXT NOT NULL DEFAULT '{}'")
   await addColumnIfMissing('skills', 'permission_policy', "TEXT NOT NULL DEFAULT '{}'")
   await addColumnIfMissing('wiki_knowledge_drafts', 'merge_strategy', "TEXT NOT NULL DEFAULT 'append'")
+  await addColumnIfMissing('session_messages', 'response_run_id', 'TEXT')
+  await addColumnIfMissing('wiki_retrieval_logs', 'response_run_id', 'TEXT')
+  await db.execute('CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_response_run ON wiki_retrieval_logs(response_run_id)')
+  await seedDefaultSessionTtlSetting()
   await migrateAllowedProjects()
   await migrateScheduledTasksBotIdNullable()
   await migrateMcpServersBotIdNullable()
   await migrateSkillsBotIdNullable()
   await seedBuiltinMcpServers()
+}
+
+async function seedDefaultSessionTtlSetting(): Promise<void> {
+  const existing = await db.execute({
+    sql: 'SELECT key FROM app_settings WHERE key = ?',
+    args: ['default_session_ttl_min'],
+  })
+  if (existing.rows.length > 0) return
+  await db.execute({
+    sql: 'INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)',
+    args: ['default_session_ttl_min', String(getEnvDefaultSessionTtlMin()), Date.now()],
+  })
 }
 
 async function addColumnIfMissing(table: string, column: string, definition: string): Promise<void> {

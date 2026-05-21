@@ -8,6 +8,7 @@ import SkillsPage from './pages/SkillsPage.js'
 import SessionsPage from './pages/SessionsPage.js'
 import ScheduledTasksPage from './pages/ScheduledTasksPage.js'
 import WikiPage from './pages/WikiPage.js'
+import SettingsPage from './pages/SettingsPage.js'
 import AppLayout from './components/AppLayout.js'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="skills" element={<SkillsPage />} />
           <Route path="scheduled-tasks" element={<ScheduledTasksPage />} />
           <Route path="wiki" element={<WikiPage />} />
+          <Route path="settings" element={<SettingsPage />} />
           <Route path="sessions" element={<SessionsPage />} />
         </Route>
       </Routes>

@@ -158,6 +158,7 @@ export interface McpServerConfig {
 // ─── Session ──────────────────────────────────────────────────────────────────
 
 export interface Session {
+  id: string
   chatKey: string
   contextId: string
   messages: SessionMessage[]
@@ -170,6 +171,7 @@ export interface SessionMessage {
   role: 'human' | 'ai'
   content: string | IncomingContent[]
   timestamp: number
+  responseRunId?: string | null
 }
 
 // ─── IM Adapter Interface (borrowed from Kite) ────────────────────────────────
@@ -183,6 +185,30 @@ export interface IncomingMessage {
   rawBody: unknown
 }
 
+export type WecomEventType =
+  | 'enter_chat'
+  | 'template_card_event'
+  | 'feedback_event'
+  | 'disconnected_event'
+  | string
+
+export type WecomEventStatus = 'pending' | 'processed' | 'duplicate' | 'error'
+
+export interface IncomingEvent {
+  msgId: string
+  eventType: WecomEventType
+  aibotId: string | null
+  chatId: string | null
+  chatKey: string
+  chatType: 'single' | 'group'
+  userId: string
+  corpid: string | null
+  responseUrl: string | null
+  createTime: number | null
+  eventPayload: Record<string, any>
+  rawBody: unknown
+}
+
 export type IncomingContent =
   | { type: 'text'; text: string }
   | { type: 'image'; url: string }
@@ -191,10 +217,90 @@ export interface IMAdapter {
   start(): Promise<void>
   stop(): Promise<void>
   onMessage(handler: (msg: IncomingMessage) => Promise<void>): void
+  onEvent?(handler: (event: IncomingEvent) => Promise<void>): void
   /** Returns messageId if platform supports it (for later edit), otherwise void */
   sendMessage(chatId: string, text: string): Promise<void | string>
   /** Throws if platform does not support editing — caller must catch and fallback */
   editMessage(chatId: string, messageId: string, text: string): Promise<void>
+}
+
+// ─── WeCom Event / Feedback Loop ──────────────────────────────────────────────
+
+export interface WecomEventRecord {
+  id: string
+  msgId: string
+  eventType: WecomEventType
+  botId: string | null
+  aibotId: string | null
+  chatKey: string | null
+  chatId: string | null
+  chatType: 'single' | 'group' | null
+  fromUserId: string | null
+  fromCorpid: string | null
+  responseUrl: string | null
+  rawPayload: Record<string, any>
+  status: WecomEventStatus
+  error: string | null
+  createTime: number | null
+  createdAt: number
+  processedAt: number | null
+}
+
+export type BotResponseRunStatus = 'pending' | 'sent' | 'error' | 'feedback_unavailable'
+
+export interface BotResponseRun {
+  id: string
+  feedbackId: string | null
+  botId: string
+  contextId: string | null
+  sessionId: string | null
+  chatKey: string
+  chatId: string
+  userId: string | null
+  questionPreview: string | null
+  answerPreview: string | null
+  provider: BotProvider
+  model: string | null
+  status: BotResponseRunStatus
+  error: string | null
+  difyConversationId: string | null
+  feedbackAvailable: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export type WikiFeedbackStatus = 'new' | 'triaged' | 'drafted' | 'resolved' | 'ignored' | 'unlinked'
+export type WikiFeedbackClassification = 'positive' | 'knowledge_gap' | 'retrieval_issue' | 'model_or_tool_issue' | 'ignored' | 'unclassified'
+
+export interface WikiFeedbackItem {
+  id: string
+  eventId: string
+  responseRunId: string | null
+  namespace: string | null
+  feedbackType: number | null
+  content: string | null
+  inaccurateReasons: number[]
+  classification: WikiFeedbackClassification
+  status: WikiFeedbackStatus
+  assignedTargetPath: string | null
+  draftId: string | null
+  resolutionNote: string | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface AnnotationAnswer {
+  id: string
+  question: string
+  answer: string
+  namespace: string | null
+  contextId: string | null
+  sourceType: string
+  sourceRef: string | null
+  enabled: boolean
+  hitCount: number
+  createdAt: number
+  updatedAt: number
 }
 
 // ─── LLM Config ───────────────────────────────────────────────────────────────

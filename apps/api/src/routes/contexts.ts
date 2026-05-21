@@ -3,6 +3,8 @@ import { ContextRepository } from '../db/context-repository.js'
 import { McpServerRepository } from '../db/mcp-server-repository.js'
 import { SkillRepository } from '../db/skill-repository.js'
 import { botManager } from '../bot-manager/bot-manager.js'
+import { SettingsRepository } from '../db/settings-repository.js'
+import { parseSessionTtlMin } from '../config/session-ttl.js'
 import type { ContextConfig, McpConfig, SkillConfig } from '@wecom-platform/types'
 
 export const contextsRouter: Router = Router({ mergeParams: true })
@@ -55,6 +57,15 @@ async function maskContextResponse(ctx: ContextConfig): Promise<ContextConfig> {
   return maskSecretSkillParams(ctx)
 }
 
+async function normalizeSessionTtlMin(value: unknown, required: boolean): Promise<number | undefined | null> {
+  if (value === undefined) return required ? await SettingsRepository.getDefaultSessionTtlMin() : undefined
+  return parseSessionTtlMin(value)
+}
+
+contextsRouter.get('/defaults', async (_req, res) => {
+  res.json({ sessionTtlMin: await SettingsRepository.getDefaultSessionTtlMin() })
+})
+
 contextsRouter.get('/', async (req, res) => {
   const { botId } = req.params as { botId: string }
   const contexts = await ContextRepository.findByBotId(botId)
@@ -63,7 +74,9 @@ contextsRouter.get('/', async (req, res) => {
 
 contextsRouter.post('/', async (req, res) => {
   const { botId } = req.params as { botId: string }
-  const data = { ...req.body, botId, mcpConfigs: req.body.mcpConfigs ?? [], skillConfigs: req.body.skillConfigs ?? [] }
+  const sessionTtlMin = await normalizeSessionTtlMin(req.body.sessionTtlMin, true)
+  if (sessionTtlMin === null) { res.status(400).json({ error: 'sessionTtlMin must be an integer between 1 and 1440' }); return }
+  const data = { ...req.body, botId, sessionTtlMin, mcpConfigs: req.body.mcpConfigs ?? [], skillConfigs: req.body.skillConfigs ?? [] }
   const err = await validateContextConfigs(data.mcpConfigs, data.skillConfigs)
   if (err) { res.status(400).json({ error: err }); return }
   const created = await ContextRepository.create(data)
@@ -80,6 +93,8 @@ contextsRouter.get('/:id', async (req, res) => {
 
 contextsRouter.put('/:id', async (req, res) => {
   const params = req.params as unknown as { botId: string; id: string }
+  const sessionTtlMin = await normalizeSessionTtlMin(req.body.sessionTtlMin, false)
+  if (sessionTtlMin === null) { res.status(400).json({ error: 'sessionTtlMin must be an integer between 1 and 1440' }); return }
   if (req.body.mcpConfigs !== undefined) {
     const err = await validateMcpConfigs(req.body.mcpConfigs)
     if (err) { res.status(400).json({ error: err }); return }
@@ -88,8 +103,9 @@ contextsRouter.put('/:id', async (req, res) => {
     const err = await validateSkillConfigs(req.body.skillConfigs)
     if (err) { res.status(400).json({ error: err }); return }
   }
-  const ctx = await ContextRepository.update(params.id, req.body)
-  if (!ctx) { res.status(404).json({ error: 'Context not found' }); return }
+  const updateData = sessionTtlMin === undefined ? req.body : { ...req.body, sessionTtlMin }
+  const ctx = await ContextRepository.update(params.id, updateData)
+  if (!ctx || ctx.botId !== params.botId) { res.status(404).json({ error: 'Context not found' }); return }
   await botManager.refreshContexts(params.botId)
   res.json(await maskContextResponse(ctx))
 })

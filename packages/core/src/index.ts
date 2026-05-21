@@ -11,5 +11,5 @@ export {
   executeSkillScript,
 } from './skill-runner.js'
 export type { SkillRuntimeContext, SkillScriptExecutionInput, SkillScriptToolInput } from './skill-runner.js'
-export { WecomAdapter, resolveChatKey } from './wecom-adapter.js'
+export { WecomAdapter, resolveChatKey, parseWecomEventBody } from './wecom-adapter.js'
 export type { WecomCredentials } from './wecom-adapter.js'
