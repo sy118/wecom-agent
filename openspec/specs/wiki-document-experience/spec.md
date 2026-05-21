@@ -1,7 +1,7 @@
 # wiki-document-experience 规范
 
 ## 目的
-待定 - 由归档变更 improve-wiki-knowledge-workflow 创建。归档后请更新目的。
+定义 Wiki namespace 详情页的文档搜索、Markdown 预览和文档概览体验，帮助管理员确认知识库内容和定位缺失文档。
 ## 需求
 ### 需求: Wiki 文档搜索
 

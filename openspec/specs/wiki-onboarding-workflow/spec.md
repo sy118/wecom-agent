@@ -1,7 +1,7 @@
 # wiki-onboarding-workflow 规范
 
 ## 目的
-待定 - 由归档变更 improve-wiki-knowledge-workflow 创建。归档后请更新目的。
+定义 Wiki 首次使用向导，帮助管理员从空知识库完成 namespace、wiki-mcp、Context 绑定、检索测试和 Bot 重启提示的最短路径配置。
 ## 需求
 ### 需求: Wiki 首次使用向导
 
@@ -13,6 +13,7 @@
 - **并且** 系统不存在任何 Wiki namespace，或不存在可用的 wiki-mcp MCP Server，或不存在绑定了 Wiki namespace 的 Context
 - **那么** 页面必须展示首次使用向导入口
 - **并且** 向导必须说明当前缺失的配置步骤
+- **并且** 缺失步骤必须与 Wiki 配置体检结果保持一致
 
 #### 场景: 向导创建 namespace
 
@@ -40,4 +41,10 @@
 - **那么** 系统必须使用当前 namespace 执行一次测试检索
 - **并且** 展示命中的页面、摘要或无结果提示
 - **并且** 不得将测试问题发送到真实企业微信群聊
+
+#### 场景: 向导提示重启 Bot
+
+- **当** 向导启用 wiki-mcp、修改 Context 绑定或保存检索策略
+- **那么** 向导必须提示管理员关联 Bot 需要重启后才会重新加载 MCP 工具
+- **并且** 当系统能识别目标 Bot 时必须提供跳转到 Bot 管理或直接重启的操作入口
 

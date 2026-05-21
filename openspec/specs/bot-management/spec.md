@@ -51,8 +51,8 @@
 - **当** 机器人启动时某个 MCP 服务器连接失败
 - **那么** 系统记录错误日志，跳过该 MCP 服务器，继续启动机器人（工具数量减少但机器人可用）
 
-### 需求:Bot 配置支持 provider 字段
-`bots` 表必须新增 `provider` 字段，可选值为 `openai-compatible`（默认）、`anthropic`、`dify`，存量数据默认为 `openai-compatible`。
+### 需求:Bot 支持 Dify 作为 LLM provider
+Bot 配置必须支持 `provider` 字段，可选值为 `openai-compatible`（默认）、`anthropic`、`dify`。当 `provider` 为 `dify` 时，系统必须通过 HTTP 调用 Dify `/v1/chat-messages` API，绕过 LangChain AgentEngine。
 
 #### 场景:新建 Bot 默认 provider
 - **当** 创建 Bot 时未指定 `provider`
@@ -61,6 +61,30 @@
 #### 场景:更新 Bot provider
 - **当** 管理员通过 UI 修改 Bot 的 `provider` 字段
 - **那么** 系统必须在下次 Bot 启动时使用新的 provider 逻辑，当前运行中的 Bot 不受影响直到重启
+
+#### 场景:Dify provider 发送消息
+- **当** Bot 的 `provider` 为 `dify` 且用户发送消息
+- **那么** 系统必须向 `difyBaseUrl/v1/chat-messages` 发送 POST 请求，携带 `query`、`conversation_id`（首次为空）、`response_mode: "blocking"` 和 `user: chatKey`，并将 `answer` 字段作为回复内容
+
+#### 场景:Dify conversation_id 持久化到 Session
+- **当** Dify 返回 `conversation_id`
+- **那么** 系统必须将其存入当前 chatKey 的 Session，下次请求时携带，实现多轮对话
+
+#### 场景:Dify Session 过期后重置 conversation_id
+- **当** chatKey 的 Session TTL 到期被清除
+- **那么** 系统必须清除对应的 `dify_conversation_id`，下次请求以新会话开始
+
+#### 场景:Dify provider 不加载本地工具
+- **当** Bot 的 `provider` 为 `dify`
+- **那么** 系统禁止初始化 AgentEngine、加载 MCP 工具或加载本地 Skill 工具，相关 Context 配置由 Dify 内部处理
+
+#### 场景:Dify API 超时处理
+- **当** Dify API 请求超过 30 秒未响应
+- **那么** 系统必须中止请求并向用户发送错误提示消息
+
+#### 场景:Anthropic provider 正常调用
+- **当** Bot 的 `provider` 为 `anthropic` 且配置了有效的 `llmApiKey` 和 `llmModel`
+- **那么** 系统必须通过 ChatAnthropic 调用 Claude API，MCP 工具正常有效
 
 ### 需求:Bot 配置支持 streamingMode 字段
 `bots` 表必须新增 `streamingMode` 字段，可选值为 `none`（默认）、`progressive`、`typewriter`。
@@ -81,7 +105,7 @@ Context 的 `allowedProjects` 字段必须支持用户自由输入任意项目�
 - **那么** 系统必须正常显示这些项目名，用户可继续编辑
 
 ### 需求:Dify Bot 配置字段
-`bots` 表必须新增 `difyBaseUrl`、`difyApiKey`、`difyAppId` 字段，仅在 `provider=dify` 时有效。
+`bots` 表必须新增 `difyBaseUrl`、`difyApiKey`、`difyAppId` 字段，仅在 `provider=dify` 时有效；当 Bot 的 `provider` 为 `dify` 时，`difyBaseUrl` 和 `difyApiKey` 字段必须非空，否则 Bot 启动必须失败并返回明确错误信息。
 
 #### 场景:Dify 配置字段在 UI 中条件显示
 - **当** 管理员在 Bot 编辑表单中选择 `provider=dify`
@@ -90,6 +114,33 @@ Context 的 `allowedProjects` 字段必须支持用户自由输入任意项目�
 #### 场景:非 Dify provider 隐藏 Dify 字段
 - **当** Bot 的 `provider` 为 `openai-compatible` 或 `anthropic`
 - **那么** 前端必须隐藏 Dify 相关配置字段，显示 `llmBaseUrl`、`llmApiKey`、`llmModel` 字段
+
+#### 场景:缺少 Dify 配置时启动失败
+- **当** Bot `provider` 为 `dify` 且 `difyBaseUrl` 或 `difyApiKey` 为空
+- **那么** 系统必须拒绝启动该 Bot，返回错误 "Dify provider requires difyBaseUrl and difyApiKey"
+
+### 需求:Dify provider 支持流式输出
+当 Bot 的 `streamingMode` 为 `typewriter` 或 `progressive` 且 provider 为 `dify` 时，系统必须使用 Dify 的 `response_mode: streaming` SSE 接口，解析 `event: message` 块逐步输出内容。
+
+#### 场景:typewriter 模式下 Dify 流式输出
+- **当** Bot streamingMode 为 typewriter，provider 为 dify，且 WeChat frame 可用
+- **那么** 系统必须调用 Dify streaming 接口，按 TYPEWRITER_INTERVAL_MS 间隔更新消息内容
+
+#### 场景:streamingMode 为 none 时使用阻塞模式
+- **当** Bot streamingMode 为 none，provider 为 dify
+- **那么** 系统必须使用 Dify 的 `response_mode: blocking` 接口
+
+#### 场景:Dify 流式调用失败时降级为阻塞模式
+- **当** Dify streaming 接口调用失败
+- **那么** 系统必须降级为阻塞模式重试，禁止直接向用户返回错误
+
+#### 场景:定时任务携带 user 参数
+- **当** 定时任务调用 Dify provider 生成内容
+- **那么** DifyClient 必须在请求体中包含基于目标 chatId 的稳定 user 标识，禁止使用默认占位 user
+
+#### 场景:Dify provider 下隐藏 MCP 配置
+- **当** 管理员进入 Dify provider Bot 的 Context 配置页面
+- **那么** 必须隐藏 MCP 能力配置区块，显示提示：“该 Bot 使用 Dify 工作流，知识库检索和工具调用由 Dify 内部处理”
 
 ### 需求:Bot 配置支持 visionEnabled 字段
 `bots` 表必须新增 `visionEnabled` 布尔字段，默认 `false`，控制是否将图片消息以多模态格式传给 LLM。

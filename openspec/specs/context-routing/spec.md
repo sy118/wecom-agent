@@ -3,9 +3,7 @@
 ## 目的
 
 支持为每个机器人创建多个上下文配置，并通过 chatKey 绑定机制将不同来源的消息路由到对应上下文，实现差异化的系统提示词和项目范围控制。
-
 ## 需求
-
 ### 需求:上下文配置管理
 系统必须支持为每个机器人创建多个上下文配置，每个上下文包含独立的系统提示词、可查项目范围和会话超时时间。
 
@@ -41,7 +39,7 @@
 - **那么** chatKey 必须格式化为 `wecom:user:${body.from.userid}`
 
 ### 需求:上下文配置中 MCP 和 Skill 绑定从全局资源池选择
-上下文配置 Modal 中的 MCP 能力区域和 Skill 区域必须从全局 MCP/Skill 列表中加载可选项，禁止从 Bot 私有列表加载。
+上下文配置 Modal 中的 MCP 能力区域和 Skill 区域必须从全局 MCP/Skill 列表中加载可选项，禁止从 Bot 私有列表加载；Context 必须使用 `mcp_configs` 存储每个 MCP Server 的启用状态和专属参数。
 
 #### 场景:上下文配置加载全局 MCP 列表
 - **当** 用户打开某个 Bot 的上下文配置 Modal
@@ -59,13 +57,49 @@
 - **当** 用户在上下文配置中开启某个 Skill 的开关并保存
 - **那么** 该 Bot 的上下文必须记录与该全局 Skill 的绑定关系及配置参数
 
+#### 场景:创建上下文时写入 mcp_configs
+- **当** 管理员通过 API 创建上下文，提交包含 `mcpConfigs` 数组的请求体
+- **那么** 系统必须将 `mcpConfigs` 序列化为 JSON 存入 `mcp_configs` 列
+
+#### 场景:读取上下文时反序列化 mcp_configs
+- **当** API 返回上下文数据
+- **那么** `mcp_configs` 必须被反序列化为 `McpConfig[]` 数组返回给客户端
+
+#### 场景:旧数据迁移
+- **当** 数据库初始化时检测到 contexts 表存在 `allowed_projects` 列但不存在 `mcp_configs` 列
+- **那么** 系统必须执行迁移：为每条 context 记录，将 `allowed_projects` 的值转换为对应 gitnexus MCP 的 `params.allowedProjects`，写入 `mcp_configs`
+
+#### 场景:引用不存在的 mcpServerId
+- **当** `mcp_configs` 中包含不存在的 `mcpServerId`
+- **那么** 系统必须返回 400 错误，说明无效的 `mcpServerId`
+
 ### 需求:项目范围限制
-每个上下文必须配置 allowed_projects 列表，Agent 调用 MCP 工具时只能查询列表内的项目。
+上下文的项目范围必须通过 MCP 配置参数表达；gitnexus 的可查项目范围必须从 `mcp_configs` 中对应条目的 `params.allowedProjects` 读取。
 
 #### 场景:项目范围注入系统提示词
-- **当** Agent 使用某个上下文处理消息
-- **那么** 系统必须将 allowed_projects 列表注入到系统提示词的项目范围限制章节，覆盖默认的全局项目列表
+- **当** gitnexus 的 `params.allowedProjects` 为非空数组
+- **那么** 系统必须将项目列表注入 system prompt 的项目范围限制章节，覆盖默认值
 
-#### 场景:空项目范围
-- **当** 上下文的 allowed_projects 为空数组
-- **那么** 系统必须拒绝创建该上下文，返回验证错误
+#### 场景:allowedProjects 为空时不限制项目
+- **当** gitnexus 的 `params.allowedProjects` 为空数组
+- **那么** 系统不注入项目范围限制，AI 可查询所有项目
+
+### 需求:编辑 chatKey 路由绑定
+系统必须允许管理员编辑已有普通 chatKey 路由绑定的可变字段，并禁止通过编辑操作修改绑定的 `chatKey`。
+
+#### 场景:编辑绑定上下文
+- **当** 管理员编辑某个绑定并提交新的 `contextId`
+- **那么** 系统必须将该绑定路由到新的上下文，并保持原 `chatKey` 不变
+
+#### 场景:编辑绑定展示信息
+- **当** 管理员编辑某个绑定并提交新的 `chatName` 或 `chatType`
+- **那么** 系统必须更新该绑定的展示信息，并保持原 `chatKey` 不变
+
+#### 场景:禁止修改 chatKey
+- **当** 管理员编辑绑定时请求修改 `chatKey`
+- **那么** 系统必须拒绝修改 `chatKey`，或忽略该字段并保持原 `chatKey` 不变
+
+#### 场景:运行中 Bot 同步绑定编辑
+- **当** 绑定编辑成功且对应 Bot 正在运行
+- **那么** 系统必须同步更新运行中 Bot 的绑定映射，使后续来自原 `chatKey` 的消息使用编辑后的绑定配置
+
