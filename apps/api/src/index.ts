@@ -17,6 +17,8 @@ import { skillsRouter } from './routes/skills.js'
 import { sessionsRouter } from './routes/sessions.js'
 import { createScheduledTasksRouter } from './routes/scheduled-tasks.js'
 import { wikiRouter } from './routes/wiki.js'
+import { wecomEventsRouter } from './routes/wecom-events.js'
+import { settingsRouter } from './routes/settings.js'
 import type { BotConfig } from '@wecom-platform/types'
 
 const PORT = Number(process.env.API_PORT ?? 3000)
@@ -40,6 +42,7 @@ async function main(): Promise<void> {
 
   const app = express()
   app.use(cors())
+  app.use('/api/wecom/events', express.raw({ type: '*/*', limit: '2mb' }), wecomEventsRouter)
   app.use(express.json())
 
   app.use('/api/auth', authRouter)
@@ -53,6 +56,7 @@ async function main(): Promise<void> {
   app.use('/api/scheduled-tasks', authMiddleware, createScheduledTasksRouter(taskScheduler))
   app.use('/api/sessions', authMiddleware, sessionsRouter)
   app.use('/api/wiki', authMiddleware, wikiRouter)
+  app.use('/api/settings', authMiddleware, settingsRouter)
 
   app.listen(PORT, () => {
     console.log(`[API] Server running on port ${PORT}`)

@@ -4,13 +4,16 @@ import { readdir, stat, readFile, writeFile, mkdir, unlink } from 'fs/promises'
 import { existsSync } from 'fs'
 import { dirname, extname, join, normalize, relative } from 'path'
 import { simpleGit } from 'simple-git'
-import type { ContextConfig, McpConfig, McpServerConfig } from '@wecom-platform/types'
+import type { ContextConfig, McpConfig, McpServerConfig, WikiFeedbackClassification, WikiFeedbackItem, WikiFeedbackStatus } from '@wecom-platform/types'
 import { BotRepository } from '../db/bot-repository.js'
 import { ContextRepository } from '../db/context-repository.js'
 import { McpServerRepository } from '../db/mcp-server-repository.js'
 import { WikiDraftRepository } from '../db/wiki-draft-repository.js'
+import { WikiFeedbackRepository } from '../db/wiki-feedback-repository.js'
+import { AnnotationAnswerRepository } from '../db/annotation-answer-repository.js'
 import { WikiNamespaceRepository, type WikiNamespace } from '../db/wiki-namespace-repository.js'
 import { WikiRetrievalLogRepository } from '../db/wiki-retrieval-log-repository.js'
+import { getResponseRunEvidenceById } from '../services/feedback-context-service.js'
 import { botManager } from '../bot-manager/bot-manager.js'
 
 export const wikiRouter: Router = Router()
@@ -231,10 +234,75 @@ function parseNumberQuery(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined
 }
 
+function parseStringQuery(value: unknown): string | undefined {
+  if (Array.isArray(value)) value = value[0]
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
 function queryWindow(req: Request): { since: number; until?: number } {
   const since = parseNumberQuery(req.query.since) ?? Date.now() - DEFAULT_METRICS_WINDOW_MS
   const until = parseNumberQuery(req.query.until)
   return until === undefined ? { since } : { since, until }
+}
+
+function feedbackStatus(value: unknown): WikiFeedbackStatus | undefined {
+  if (value === 'new' || value === 'triaged' || value === 'drafted' || value === 'resolved' || value === 'ignored' || value === 'unlinked') return value
+  return undefined
+}
+
+function feedbackClassification(value: unknown): WikiFeedbackClassification | undefined {
+  if (
+    value === 'positive' ||
+    value === 'knowledge_gap' ||
+    value === 'retrieval_issue' ||
+    value === 'model_or_tool_issue' ||
+    value === 'ignored' ||
+    value === 'unclassified'
+  ) return value
+  return undefined
+}
+
+function feedbackTypeLabel(type: number | null): string {
+  if (type === 1) return '准确'
+  if (type === 2) return '不准确'
+  if (type === 3) return '取消反馈'
+  return '未知反馈'
+}
+
+function inaccurateReasonLabel(reason: number): string {
+  const labels: Record<number, string> = {
+    1: '与问题无关',
+    2: '内容不完整',
+    3: '内容有错误',
+    4: '数据分析错误',
+  }
+  return labels[reason] ?? `原因 ${reason}`
+}
+
+function feedbackDraftContent(item: WikiFeedbackItem | null, evidence: Awaited<ReturnType<typeof getResponseRunEvidenceById>>): string {
+  const run = evidence?.responseRun
+  const retrieval = evidence?.retrievalLogs ?? []
+  const reasons = item?.inaccurateReasons.map(inaccurateReasonLabel).join('、') || '未选择'
+  const evidenceLines = retrieval.length === 0
+    ? '- 暂无检索证据'
+    : retrieval.map((log) => `- ${log.policy}: ${log.query}，命中 ${log.hitCount}，路径 ${log.hitPaths.join(', ') || '无'}`)
+  return [
+    `# ${run?.questionPreview ?? '待补充问题'}`,
+    '',
+    '## 用户反馈',
+    `- 类型：${feedbackTypeLabel(item?.feedbackType ?? null)}`,
+    `- 负反馈原因：${reasons}`,
+    `- 用户补充：${item?.content || '无'}`,
+    '',
+    '## 原始回答',
+    run?.answerPreview ?? '暂无原始回答',
+    '',
+    '## 检索证据',
+    ...evidenceLines,
+    '',
+    '## 待补充标准答案',
+    '请在这里补充审核后的知识内容。',
+  ].join('\n')
 }
 
 function mergeStrategy(value: unknown, fallback: string | undefined = 'append'): MergeStrategy {
@@ -532,13 +600,14 @@ wikiRouter.get('/:namespace/metrics', async (req, res) => {
   const ns = await findNamespaceOr404(nsParam(req), res)
   if (!ns) return
   const { since, until } = queryWindow(req)
-  const [files, bindings, pendingDraftCount, retrievalCounts, hotDocuments, topMisses] = await Promise.all([
+  const [files, bindings, pendingDraftCount, retrievalCounts, hotDocuments, topMisses, feedbackMetrics] = await Promise.all([
     collectMdFiles(namespaceDir(ns)),
     bindingSummary(ns.name),
     WikiDraftRepository.countPendingByNamespace(ns.name),
     WikiRetrievalLogRepository.countByNamespace(ns.name, since),
     WikiRetrievalLogRepository.hotDocuments(ns.name, since, 10),
     WikiRetrievalLogRepository.summarizeMisses(ns.name, since, 10),
+    WikiFeedbackRepository.metrics({ namespace: ns.name, since, until }),
   ])
   const latestModifiedAt = files.reduce<number | null>((latest, file) => latest === null ? file.updatedAt : Math.max(latest, file.updatedAt), null)
   res.json({
@@ -553,6 +622,7 @@ wikiRouter.get('/:namespace/metrics', async (req, res) => {
     missCount: retrievalCounts.misses,
     hotDocuments,
     topMisses,
+    feedback: feedbackMetrics,
   })
 })
 
@@ -631,6 +701,185 @@ wikiRouter.delete('/:namespace/bindings/:contextId', async (req, res) => {
   })
   const updated = await ContextRepository.update(context.id, { mcpConfigs })
   if (updated) await botManager.refreshContexts(context.botId)
+  res.status(204).send()
+})
+
+// GET /api/wiki/:namespace/feedback/metrics
+wikiRouter.get('/:namespace/feedback/metrics', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const { since, until } = queryWindow(req)
+  res.json({ namespace: ns.name, since, until: until ?? null, metrics: await WikiFeedbackRepository.metrics({ namespace: ns.name, since, until }) })
+})
+
+// GET /api/wiki/:namespace/feedback
+wikiRouter.get('/:namespace/feedback', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const { since, until } = queryWindow(req)
+  const reason = parseNumberQuery(req.query.reason)
+  const contextId = parseStringQuery(req.query.contextId)
+  const items = await WikiFeedbackRepository.list({
+    namespace: ns.name,
+    status: feedbackStatus(req.query.status),
+    classification: feedbackClassification(req.query.classification),
+    since,
+    until,
+    limit: parseNumberQuery(req.query.limit) ?? 100,
+  })
+  const enriched = await Promise.all(items.map(async (item) => ({
+    item,
+    evidence: item.responseRunId ? await getResponseRunEvidenceById(item.responseRunId) : null,
+  })))
+  const filtered = enriched.filter(({ item, evidence }) => {
+    if (reason !== undefined && !item.inaccurateReasons.includes(reason)) return false
+    if (contextId && evidence?.responseRun.contextId !== contextId) return false
+    return true
+  })
+  res.json({
+    namespace: ns.name,
+    since,
+    until: until ?? null,
+    items: filtered.map(({ item, evidence }) => ({ ...item, responseRun: evidence?.responseRun ?? null })),
+  })
+})
+
+// GET /api/wiki/:namespace/feedback/:id
+wikiRouter.get('/:namespace/feedback/:id', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const item = await WikiFeedbackRepository.findById(req.params.id)
+  if (!item || item.namespace !== ns.name) { res.status(404).json({ error: 'feedback item not found' }); return }
+  const evidence = item.responseRunId ? await getResponseRunEvidenceById(item.responseRunId) : null
+  res.json({ item, evidence })
+})
+
+// PATCH /api/wiki/:namespace/feedback/:id
+wikiRouter.patch('/:namespace/feedback/:id', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const item = await WikiFeedbackRepository.findById(req.params.id)
+  if (!item || item.namespace !== ns.name) { res.status(404).json({ error: 'feedback item not found' }); return }
+  const body = req.body as Record<string, unknown>
+  const updated = await WikiFeedbackRepository.update(item.id, {
+    status: body.status !== undefined ? feedbackStatus(body.status) : undefined,
+    classification: body.classification !== undefined ? feedbackClassification(body.classification) : undefined,
+    assignedTargetPath: body.assignedTargetPath !== undefined ? String(body.assignedTargetPath ?? '') || null : undefined,
+    resolutionNote: body.resolutionNote !== undefined ? String(body.resolutionNote ?? '') || null : undefined,
+  })
+  res.json(updated)
+})
+
+// POST /api/wiki/:namespace/feedback/:id/draft
+wikiRouter.post('/:namespace/feedback/:id/draft', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const item = await WikiFeedbackRepository.findById(req.params.id)
+  if (!item || item.namespace !== ns.name) { res.status(404).json({ error: 'feedback item not found' }); return }
+  const body = req.body as Record<string, unknown>
+  const targetPath = String(body.targetPath ?? item.assignedTargetPath ?? `feedback/${item.id}.md`)
+  if (!safeRelativePath(targetPath, true)) { res.status(400).json({ error: 'invalid target path' }); return }
+  const evidence = item.responseRunId ? await getResponseRunEvidenceById(item.responseRunId) : null
+  const draft = await WikiDraftRepository.create({
+    namespace: ns.name,
+    targetPath,
+    content: String(body.content ?? feedbackDraftContent(item, evidence)),
+    sourceType: 'feedback-event',
+    sourceRef: `feedback:${item.id};run:${item.responseRunId ?? 'unlinked'}`,
+    mergeStrategy: mergeStrategy(body.mergeStrategy),
+  })
+  await WikiFeedbackRepository.update(item.id, {
+    status: 'drafted',
+    draftId: draft.id,
+    assignedTargetPath: targetPath,
+    resolutionNote: body.resolutionNote !== undefined ? String(body.resolutionNote ?? '') || null : item.resolutionNote,
+  })
+  res.status(201).json(draft)
+})
+
+// GET /api/wiki/:namespace/annotation-answers
+wikiRouter.get('/:namespace/annotation-answers', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  res.json(await AnnotationAnswerRepository.list({
+    namespace: ns.name,
+    contextId: parseStringQuery(req.query.contextId),
+    enabled: req.query.enabled === undefined ? undefined : req.query.enabled === 'true' || req.query.enabled === '1',
+  }))
+})
+
+// POST /api/wiki/:namespace/annotation-answers
+wikiRouter.post('/:namespace/annotation-answers', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const body = req.body as Record<string, unknown>
+  const question = String(body.question ?? '')
+  const answer = String(body.answer ?? '')
+  if (!question.trim() || !answer.trim()) { res.status(400).json({ error: 'question and answer are required' }); return }
+  const created = await AnnotationAnswerRepository.create({
+    question,
+    answer,
+    namespace: ns.name,
+    contextId: body.contextId ? String(body.contextId) : null,
+    sourceType: body.sourceType ? String(body.sourceType) : 'manual',
+    sourceRef: body.sourceRef ? String(body.sourceRef) : null,
+    enabled: body.enabled === undefined ? true : Boolean(body.enabled),
+  })
+  res.status(201).json(created)
+})
+
+// POST /api/wiki/:namespace/annotation-answers/from-feedback/:feedbackId
+wikiRouter.post('/:namespace/annotation-answers/from-feedback/:feedbackId', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const item = await WikiFeedbackRepository.findById(req.params.feedbackId)
+  if (!item || item.namespace !== ns.name) { res.status(404).json({ error: 'feedback item not found' }); return }
+  const evidence = item.responseRunId ? await getResponseRunEvidenceById(item.responseRunId) : null
+  const body = req.body as Record<string, unknown>
+  const question = String(body.question ?? evidence?.responseRun.questionPreview ?? '')
+  const answer = String(body.answer ?? evidence?.responseRun.answerPreview ?? '')
+  if (!question.trim() || !answer.trim()) { res.status(400).json({ error: 'question and answer are required' }); return }
+  if (item.feedbackType !== 1 && item.status !== 'resolved' && body.answer === undefined) {
+    res.status(409).json({ error: 'negative feedback must be resolved or provide reviewed answer' })
+    return
+  }
+  const created = await AnnotationAnswerRepository.create({
+    question,
+    answer,
+    namespace: ns.name,
+    contextId: evidence?.responseRun.contextId ?? null,
+    sourceType: 'feedback-event',
+    sourceRef: item.id,
+    enabled: body.enabled === undefined ? true : Boolean(body.enabled),
+  })
+  res.status(201).json(created)
+})
+
+// PUT /api/wiki/:namespace/annotation-answers/:id
+wikiRouter.put('/:namespace/annotation-answers/:id', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const existing = await AnnotationAnswerRepository.findById(req.params.id)
+  if (!existing || existing.namespace !== ns.name) { res.status(404).json({ error: 'annotation answer not found' }); return }
+  const body = req.body as Record<string, unknown>
+  const updated = await AnnotationAnswerRepository.update(existing.id, {
+    question: body.question !== undefined ? String(body.question) : undefined,
+    answer: body.answer !== undefined ? String(body.answer) : undefined,
+    contextId: body.contextId !== undefined ? String(body.contextId ?? '') || null : undefined,
+    sourceType: body.sourceType !== undefined ? String(body.sourceType) : undefined,
+    sourceRef: body.sourceRef !== undefined ? String(body.sourceRef ?? '') || null : undefined,
+    enabled: body.enabled !== undefined ? Boolean(body.enabled) : undefined,
+  })
+  res.json(updated)
+})
+
+// DELETE /api/wiki/:namespace/annotation-answers/:id
+wikiRouter.delete('/:namespace/annotation-answers/:id', async (req, res) => {
+  const ns = await findNamespaceOr404(nsParam(req), res)
+  if (!ns) return
+  const existing = await AnnotationAnswerRepository.findById(req.params.id)
+  if (!existing || existing.namespace !== ns.name) { res.status(404).json({ error: 'annotation answer not found' }); return }
+  await AnnotationAnswerRepository.delete(existing.id)
   res.status(204).send()
 })
 
@@ -744,6 +993,7 @@ wikiRouter.post('/:namespace/drafts/:id/approve', async (req, res) => {
     await git.add(full)
     await git.commit(`wiki: approve draft ${draft.id} to ${ns.name}/${safeTarget} (${strategy})`)
     const merged = await WikiDraftRepository.markMerged(draft.id, String((req.body as Record<string, unknown>)?.reviewedBy ?? 'admin'))
+    await WikiFeedbackRepository.markResolvedByDraftId(draft.id)
     res.json(merged)
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : String(err) })

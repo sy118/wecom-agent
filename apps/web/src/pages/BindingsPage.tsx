@@ -16,6 +16,7 @@ export default function BindingsPage() {
   const [discovered, setDiscovered] = useState<DiscoveredChat[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
+  const [editingBinding, setEditingBinding] = useState<Binding | null>(null)
   const [form] = Form.useForm()
 
   const load = async () => {
@@ -34,9 +35,18 @@ export default function BindingsPage() {
 
   const handleSave = async (values: any) => {
     try {
-      await bindingsApi.create(botId!, values)
-      message.success('绑定成功')
-      setModalOpen(false); form.resetFields(); load()
+      if (editingBinding) {
+        await bindingsApi.update(botId!, editingBinding.id, {
+          chatName: values.chatName,
+          chatType: values.chatType,
+          contextId: values.contextId,
+        })
+        message.success('已更新')
+      } else {
+        await bindingsApi.create(botId!, values)
+        message.success('绑定成功')
+      }
+      setModalOpen(false); setEditingBinding(null); form.resetFields(); load()
     } catch { message.error('保存失败') }
   }
 
@@ -47,7 +57,19 @@ export default function BindingsPage() {
 
   // Pre-fill form from a discovered chat
   const handleBindDiscovered = (chat: DiscoveredChat) => {
+    setEditingBinding(null)
     form.setFieldsValue({ chatKey: chat.chatKey, chatType: chat.chatType, chatName: '' })
+    setModalOpen(true)
+  }
+
+  const handleEdit = (binding: Binding) => {
+    setEditingBinding(binding)
+    form.setFieldsValue({
+      chatKey: binding.chatKey,
+      chatName: binding.chatName ?? '',
+      chatType: binding.chatType,
+      contextId: binding.contextId,
+    })
     setModalOpen(true)
   }
 
@@ -61,9 +83,12 @@ export default function BindingsPage() {
     {
       title: '操作', key: 'actions',
       render: (_: any, b: Binding) => (
-        <Popconfirm title="确认删除？" onConfirm={() => handleDelete(b.id)}>
-          <Button size="small" danger>删除</Button>
-        </Popconfirm>
+        <Space>
+          <Button size="small" onClick={() => handleEdit(b)}>编辑</Button>
+          <Popconfirm title="确认删除？" onConfirm={() => handleDelete(b.id)}>
+            <Button size="small" danger>删除</Button>
+          </Popconfirm>
+        </Space>
       )
     },
   ]
@@ -100,7 +125,7 @@ export default function BindingsPage() {
         </Space>
         <Space>
           <Button icon={<ReloadOutlined />} onClick={load}>刷新</Button>
-          <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setModalOpen(true) }}>
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => { setEditingBinding(null); form.resetFields(); setModalOpen(true) }}>
             手动新建绑定
           </Button>
         </Space>
@@ -137,15 +162,15 @@ export default function BindingsPage() {
       </Card>
 
       <Modal
-        title="新建绑定"
+        title={editingBinding ? '编辑绑定' : '新建绑定'}
         open={modalOpen}
         onOk={() => form.submit()}
-        onCancel={() => { setModalOpen(false); form.resetFields() }}
+        onCancel={() => { setModalOpen(false); setEditingBinding(null); form.resetFields() }}
       >
         <Form form={form} onFinish={handleSave} layout="vertical">
           <Form.Item name="chatKey" label="Chat Key" rules={[{ required: true }]}
-            extra="群聊或用户的唯一标识，从「待绑定会话」点击绑定时自动填入">
-            <Input placeholder="wecom:group:xxx 或 wecom:user:xxx" />
+            extra={editingBinding ? 'Chat Key 是绑定身份，编辑时不可修改' : '群聊或用户的唯一标识，从「待绑定会话」点击绑定时自动填入'}>
+            <Input disabled={Boolean(editingBinding)} placeholder="wecom:group:xxx 或 wecom:user:xxx" />
           </Form.Item>
           <Form.Item name="chatName" label="显示名称" extra="便于识别，例如「库存异常群」">
             <Input placeholder="可选" />

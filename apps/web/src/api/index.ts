@@ -17,15 +17,22 @@ export const botsApi = {
 
 export const contextsApi = {
   list: (botId: string) => api.get(`/bots/${botId}/contexts`).then((r) => r.data),
+  defaults: (botId: string) => api.get(`/bots/${botId}/contexts/defaults`).then((r) => r.data),
   create: (botId: string, data: unknown) => api.post(`/bots/${botId}/contexts`, data).then((r) => r.data),
   update: (botId: string, id: string, data: unknown) => api.put(`/bots/${botId}/contexts/${id}`, data).then((r) => r.data),
   delete: (botId: string, id: string) => api.delete(`/bots/${botId}/contexts/${id}`),
+}
+
+export const settingsApi = {
+  get: () => api.get('/settings').then((r) => r.data),
+  update: (data: unknown) => api.put('/settings', data).then((r) => r.data),
 }
 
 export const bindingsApi = {
   list: (botId: string) => api.get(`/bots/${botId}/bindings`).then((r) => r.data),
   discovered: (botId: string) => api.get(`/bots/${botId}/bindings/discovered`).then((r) => r.data),
   create: (botId: string, data: unknown) => api.post(`/bots/${botId}/bindings`, data).then((r) => r.data),
+  update: (botId: string, id: string, data: unknown) => api.put(`/bots/${botId}/bindings/${id}`, data).then((r) => r.data),
   delete: (botId: string, id: string) => api.delete(`/bots/${botId}/bindings/${id}`),
 }
 
@@ -98,5 +105,24 @@ export const wikiApi = {
     api.post(`/wiki/${namespace}/drafts/${id}/approve`, data).then((r) => r.data),
   rejectDraft: (namespace: string, id: string, data: unknown = {}) =>
     api.post(`/wiki/${namespace}/drafts/${id}/reject`, data).then((r) => r.data),
+  feedback: (namespace: string, params: Record<string, unknown> = {}) =>
+    api.get(`/wiki/${namespace}/feedback`, { params }).then((r) => r.data),
+  feedbackMetrics: (namespace: string, params: Record<string, unknown> = {}) =>
+    api.get(`/wiki/${namespace}/feedback/metrics`, { params }).then((r) => r.data),
+  feedbackDetail: (namespace: string, id: string) => api.get(`/wiki/${namespace}/feedback/${id}`).then((r) => r.data),
+  updateFeedback: (namespace: string, id: string, data: unknown) =>
+    api.patch(`/wiki/${namespace}/feedback/${id}`, data).then((r) => r.data),
+  feedbackToDraft: (namespace: string, id: string, data: unknown = {}) =>
+    api.post(`/wiki/${namespace}/feedback/${id}/draft`, data).then((r) => r.data),
+  listAnnotationAnswers: (namespace: string, params: Record<string, unknown> = {}) =>
+    api.get(`/wiki/${namespace}/annotation-answers`, { params }).then((r) => r.data),
+  createAnnotationAnswer: (namespace: string, data: unknown) =>
+    api.post(`/wiki/${namespace}/annotation-answers`, data).then((r) => r.data),
+  createAnnotationAnswerFromFeedback: (namespace: string, feedbackId: string, data: unknown = {}) =>
+    api.post(`/wiki/${namespace}/annotation-answers/from-feedback/${feedbackId}`, data).then((r) => r.data),
+  updateAnnotationAnswer: (namespace: string, id: string, data: unknown) =>
+    api.put(`/wiki/${namespace}/annotation-answers/${id}`, data).then((r) => r.data),
+  deleteAnnotationAnswer: (namespace: string, id: string) =>
+    api.delete(`/wiki/${namespace}/annotation-answers/${id}`),
   gitPull: () => api.post('/wiki/git-pull').then((r) => r.data),
 }

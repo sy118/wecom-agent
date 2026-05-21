@@ -91,3 +91,81 @@ test('WecomAdapter preserves quoted image decrypt failure marker', async () => {
     globalThis.fetch = originalFetch
   }
 })
+
+test('WecomAdapter parses enter_chat event separately from messages', async () => {
+  const adapter = new WecomAdapter({ botId: 'bot', secret: 'secret', wsUrl: 'ws://example.test' })
+  const parsed = await adapter.__testParseEventFrame({
+    body: {
+      msgid: 'e1',
+      msgtype: 'event',
+      create_time: 1700000000,
+      aibotid: 'aibot-1',
+      chattype: 'single',
+      from: { corpid: 'corp-1', userid: 'user-1' },
+      event: { eventtype: 'enter_chat' },
+    },
+  })
+
+  assert.equal(parsed?.eventType, 'enter_chat')
+  assert.equal(parsed?.chatKey, 'wecom:user:user-1')
+  assert.equal(parsed?.userId, 'user-1')
+})
+
+test('WecomAdapter parses template_card_event payload', async () => {
+  const adapter = new WecomAdapter({ botId: 'bot', secret: 'secret', wsUrl: 'ws://example.test' })
+  const parsed = await adapter.__testParseEventFrame({
+    body: {
+      msgid: 'e2',
+      msgtype: 'event',
+      chatid: 'chat-1',
+      chattype: 'group',
+      response_url: 'https://example.test/response',
+      from: { userid: 'user-1' },
+      event: {
+        eventtype: 'template_card_event',
+        template_card_event: { card_type: 'button_interaction', event_key: 'approve', task_id: 'task-1' },
+      },
+    },
+  })
+
+  assert.equal(parsed?.eventType, 'template_card_event')
+  assert.equal(parsed?.chatKey, 'wecom:group:chat-1')
+  assert.equal(parsed?.responseUrl, 'https://example.test/response')
+  assert.equal(parsed?.eventPayload.template_card_event.event_key, 'approve')
+})
+
+test('WecomAdapter parses feedback_event payload', async () => {
+  const adapter = new WecomAdapter({ botId: 'bot', secret: 'secret', wsUrl: 'ws://example.test' })
+  const parsed = await adapter.__testParseEventFrame({
+    body: {
+      msgid: 'e3',
+      msgtype: 'event',
+      chatid: 'chat-1',
+      chattype: 'group',
+      from: { userid: 'user-1' },
+      event: {
+        eventtype: 'feedback_event',
+        feedback_event: { id: 'feedback-1', type: 2, content: '不完整', inaccurate_reason_list: [2] },
+      },
+    },
+  })
+
+  assert.equal(parsed?.eventType, 'feedback_event')
+  assert.equal(parsed?.eventPayload.feedback_event.id, 'feedback-1')
+  assert.deepEqual(parsed?.eventPayload.feedback_event.inaccurate_reason_list, [2])
+})
+
+test('WecomAdapter preserves unknown event types for safe storage', async () => {
+  const adapter = new WecomAdapter({ botId: 'bot', secret: 'secret', wsUrl: 'ws://example.test' })
+  const parsed = await adapter.__testParseEventFrame({
+    body: {
+      msgid: 'e4',
+      msgtype: 'event',
+      from: { userid: 'user-1' },
+      event: { eventtype: 'future_event', future_event: { value: 1 } },
+    },
+  })
+
+  assert.equal(parsed?.eventType, 'future_event')
+  assert.equal(parsed?.eventPayload.future_event.value, 1)
+})

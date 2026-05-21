@@ -7,6 +7,7 @@ export interface WikiRetrievalLog {
   botId: string | null
   contextId: string | null
   chatKey: string | null
+  responseRunId: string | null
   namespace: string
   policy: string
   query: string
@@ -46,6 +47,7 @@ function rowToLog(row: Record<string, unknown>): WikiRetrievalLog {
     botId: (row.bot_id as string | null) ?? null,
     contextId: (row.context_id as string | null) ?? null,
     chatKey: (row.chat_key as string | null) ?? null,
+    responseRunId: (row.response_run_id as string | null) ?? null,
     namespace: row.namespace as string,
     policy: row.policy as string,
     query: row.query as string,
@@ -62,6 +64,7 @@ export const WikiRetrievalLogRepository = {
     botId?: string | null
     contextId?: string | null
     chatKey?: string | null
+    responseRunId?: string | null
     namespace: string
     policy: string
     query: string
@@ -75,13 +78,14 @@ export const WikiRetrievalLogRepository = {
     const createdAt = data.createdAt ?? Date.now()
     await db.execute({
       sql: `INSERT INTO wiki_retrieval_logs
-              (id, bot_id, context_id, chat_key, namespace, policy, query, hit_count, hit_paths, duration_ms, error, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              (id, bot_id, context_id, chat_key, response_run_id, namespace, policy, query, hit_count, hit_paths, duration_ms, error, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
         id,
         data.botId ?? null,
         data.contextId ?? null,
         data.chatKey ?? null,
+        data.responseRunId ?? null,
         data.namespace,
         data.policy,
         data.query,
@@ -93,6 +97,14 @@ export const WikiRetrievalLogRepository = {
       ],
     })
     return (await this.findById(id))!
+  },
+
+  async findByResponseRunId(responseRunId: string): Promise<WikiRetrievalLog[]> {
+    const res = await db.execute({
+      sql: 'SELECT * FROM wiki_retrieval_logs WHERE response_run_id = ? ORDER BY created_at ASC',
+      args: [responseRunId],
+    })
+    return res.rows.map(rowToLog)
   },
 
   async findById(id: string): Promise<WikiRetrievalLog | null> {

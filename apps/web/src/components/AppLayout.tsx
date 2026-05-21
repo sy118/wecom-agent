@@ -1,5 +1,5 @@
 import { ConfigProvider, Layout, Menu, Button, Space } from 'antd'
-import { RobotOutlined, MessageOutlined, LogoutOutlined, CloudOutlined, ApiOutlined, ThunderboltOutlined, ScheduleOutlined, BookOutlined } from '@ant-design/icons'
+import { RobotOutlined, MessageOutlined, LogoutOutlined, CloudOutlined, ApiOutlined, ThunderboltOutlined, ScheduleOutlined, BookOutlined, SettingOutlined } from '@ant-design/icons'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 
 const { Sider, Header, Content } = Layout
@@ -10,6 +10,7 @@ function getSelectedKey(pathname: string): string {
   if (pathname.startsWith('/skills')) return 'skills'
   if (pathname.startsWith('/scheduled-tasks')) return 'scheduled-tasks'
   if (pathname.startsWith('/wiki')) return 'wiki'
+  if (pathname.startsWith('/settings')) return 'settings'
   return 'bots'
 }
 
@@ -65,6 +66,7 @@ export default function AppLayout() {
               { key: 'skills', icon: <ThunderboltOutlined />, label: '技能包', onClick: () => navigate('/skills') },
               { key: 'scheduled-tasks', icon: <ScheduleOutlined />, label: '定时任务', onClick: () => navigate('/scheduled-tasks') },
               { key: 'wiki', icon: <BookOutlined />, label: 'Wiki 知识库', onClick: () => navigate('/wiki') },
+              { key: 'settings', icon: <SettingOutlined />, label: '平台设置', onClick: () => navigate('/settings') },
               { type: 'divider' },
               { key: 'sessions', icon: <MessageOutlined />, label: '会话监控', onClick: () => navigate('/sessions') },
             ]} />

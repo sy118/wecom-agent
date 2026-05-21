@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import { db } from './client.js'
-import type { Binding } from '@wecom-platform/types'
+import type { Binding, ChatType } from '@wecom-platform/types'
 
 function rowToBinding(row: Record<string, unknown>): Binding {
   return {
@@ -25,6 +25,21 @@ export const BindingRepository = {
     return res.rows[0] ? rowToBinding(res.rows[0]) : null
   },
 
+  async findById(botId: string, id: string): Promise<Binding | null> {
+    const res = await db.execute({ sql: 'SELECT * FROM bindings WHERE bot_id = ? AND id = ?', args: [botId, id] })
+    return res.rows[0] ? rowToBinding(res.rows[0]) : null
+  },
+
+  async update(botId: string, id: string, data: { contextId: string; chatName?: string | null; chatType: ChatType }): Promise<Binding | null> {
+    const existing = await this.findById(botId, id)
+    if (!existing) return null
+    await db.execute({
+      sql: 'UPDATE bindings SET context_id = ?, chat_name = ?, chat_type = ? WHERE bot_id = ? AND id = ?',
+      args: [data.contextId, data.chatName ?? null, data.chatType, botId, id],
+    })
+    return this.findById(botId, id)
+  },
+
   async upsert(data: Omit<Binding, 'id' | 'createdAt'>): Promise<Binding> {
     const existing = await this.findByChatKey(data.botId, data.chatKey)
     if (existing) {
@@ -42,7 +57,10 @@ export const BindingRepository = {
     return (await this.findByChatKey(data.botId, data.chatKey))!
   },
 
-  async delete(id: string): Promise<void> {
-    await db.execute({ sql: 'DELETE FROM bindings WHERE id = ?', args: [id] })
+  async delete(botId: string, id: string): Promise<Binding | null> {
+    const existing = await this.findById(botId, id)
+    if (!existing) return null
+    await db.execute({ sql: 'DELETE FROM bindings WHERE bot_id = ? AND id = ?', args: [botId, id] })
+    return existing
   },
 }

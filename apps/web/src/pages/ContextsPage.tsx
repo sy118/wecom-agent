@@ -45,6 +45,7 @@ export default function ContextsPage() {
   const [bot, setBot] = useState<Bot | null>(null)
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
+  const [defaultSessionTtlMin, setDefaultSessionTtlMin] = useState(30)
   const [editCtx, setEditCtx] = useState<Context | null>(null)
   const [formMcpConfigs, setFormMcpConfigs] = useState<McpConfig[]>([])
   const [formSkillConfigs, setFormSkillConfigs] = useState<SkillConfig[]>([])
@@ -54,18 +55,20 @@ export default function ContextsPage() {
   const load = async () => {
     setLoading(true)
     try {
-      const [ctxList, mcpList, skillList, botData, wikiNsList] = await Promise.all([
+      const [ctxList, mcpList, skillList, botData, wikiNsList, defaults] = await Promise.all([
         contextsApi.list(botId!),
         mcpServersApi.list(),
         skillsApi.list(),
         botsApi.get(botId!),
         wikiApi.listNamespaces().catch(() => []),
+        contextsApi.defaults(botId!).catch(() => ({ sessionTtlMin: 30 })),
       ])
       setContexts(ctxList)
       setMcpServers(mcpList)
       setSkills(skillList)
       setBot(botData)
       setWikiNamespaces(wikiNsList)
+      setDefaultSessionTtlMin(defaults.sessionTtlMin)
     } finally {
       setLoading(false)
     }
@@ -85,6 +88,7 @@ export default function ContextsPage() {
       setFormMcpConfigs(ctx.mcpConfigs ?? [])
     } else {
       form.resetFields()
+      form.setFieldsValue({ sessionTtlMin: defaultSessionTtlMin, isDefault: false })
       setFormMcpConfigs(mcpServers.map((server) => ({ mcpServerId: server.id, enabled: false, params: {} })))
     }
 
@@ -391,7 +395,12 @@ export default function ContextsPage() {
             })
           )}
 
-          <Form.Item name="sessionTtlMin" label="会话超时（分钟）" initialValue={30}>
+          <Form.Item
+            name="sessionTtlMin"
+            label="会话超时（分钟）"
+            initialValue={defaultSessionTtlMin}
+            extra={`新建上下文默认使用平台设置：${defaultSessionTtlMin} 分钟；已有上下文使用各自保存的 TTL`}
+          >
             <InputNumber min={1} max={1440} />
           </Form.Item>
           <Form.Item name="isDefault" label="设为默认上下文" valuePropName="checked" initialValue={false}>

@@ -88,6 +88,41 @@ interface RetrievalLog {
   createdAt: number
 }
 
+interface WikiFeedbackItem {
+  id: string
+  responseRunId: string | null
+  namespace: string | null
+  feedbackType: number | null
+  content: string | null
+  inaccurateReasons: number[]
+  classification: string
+  status: string
+  assignedTargetPath: string | null
+  draftId: string | null
+  resolutionNote: string | null
+  createdAt: number
+  responseRun?: {
+    id: string
+    contextId: string | null
+    questionPreview: string | null
+    answerPreview: string | null
+    status: string
+  } | null
+}
+
+interface AnnotationAnswer {
+  id: string
+  question: string
+  answer: string
+  namespace: string | null
+  contextId: string | null
+  sourceType: string
+  sourceRef: string | null
+  enabled: boolean
+  hitCount: number
+  updatedAt: number
+}
+
 interface MissSummary {
   query: string
   count: number
@@ -105,6 +140,16 @@ interface WikiMetrics {
   missCount: number
   hotDocuments: Array<{ path: string; hitCount: number }>
   topMisses: MissSummary[]
+  feedback?: {
+    total: number
+    positive: number
+    negative: number
+    negativeRate: number
+    pending: number
+    drafted: number
+    reasonCounts: Record<string, number>
+    classificationCounts: Record<string, number>
+  }
 }
 
 interface DraftDiff {
@@ -141,11 +186,48 @@ function statusLabel(status?: string) {
 function sourceTypeLabel(sourceType?: string) {
   if (sourceType === 'manual') return '手动创建'
   if (sourceType === 'retrieval-miss') return '无命中问题'
+  if (sourceType === 'feedback-event') return '用户反馈'
   if (sourceType === 'bot') return '机器人'
   if (sourceType === 'skill') return '技能'
   if (sourceType === 'scheduled-task') return '定时任务'
   if (sourceType === 'test') return '测试'
   return sourceType ?? '未知来源'
+}
+
+function feedbackStatusLabel(status?: string) {
+  if (status === 'new') return '新反馈'
+  if (status === 'triaged') return '已分流'
+  if (status === 'drafted') return '已转草稿'
+  if (status === 'resolved') return '已解决'
+  if (status === 'ignored') return '已忽略'
+  if (status === 'unlinked') return '未关联'
+  return status ?? '未知'
+}
+
+function feedbackClassificationLabel(value?: string) {
+  if (value === 'positive') return '正向反馈'
+  if (value === 'knowledge_gap') return '知识缺失'
+  if (value === 'retrieval_issue') return '检索问题'
+  if (value === 'model_or_tool_issue') return '模型/工具问题'
+  if (value === 'ignored') return '忽略'
+  return '未分类'
+}
+
+function feedbackTypeLabel(type?: number | null) {
+  if (type === 1) return '准确'
+  if (type === 2) return '不准确'
+  if (type === 3) return '取消'
+  return '未知'
+}
+
+function inaccurateReasonLabel(reason: number) {
+  const labels: Record<number, string> = {
+    1: '与问题无关',
+    2: '内容不完整',
+    3: '内容有错误',
+    4: '数据分析错误',
+  }
+  return labels[reason] ?? `原因 ${reason}`
 }
 
 function healthColor(status: HealthStatus) {
@@ -306,6 +388,15 @@ export default function WikiPage() {
   const [drafts, setDrafts] = useState<WikiDraft[]>([])
   const [retrievalLogs, setRetrievalLogs] = useState<RetrievalLog[]>([])
   const [misses, setMisses] = useState<MissSummary[]>([])
+  const [feedbackItems, setFeedbackItems] = useState<WikiFeedbackItem[]>([])
+  const [feedbackMetrics, setFeedbackMetrics] = useState<WikiMetrics['feedback'] | null>(null)
+  const [feedbackStatusFilter, setFeedbackStatusFilter] = useState<string | undefined>()
+  const [feedbackReasonFilter, setFeedbackReasonFilter] = useState<number | undefined>()
+  const [feedbackContextFilter, setFeedbackContextFilter] = useState<string | undefined>()
+  const [feedbackWindowDays, setFeedbackWindowDays] = useState<number>(7)
+  const [feedbackDetailOpen, setFeedbackDetailOpen] = useState(false)
+  const [activeFeedbackDetail, setActiveFeedbackDetail] = useState<any>(null)
+  const [annotationAnswers, setAnnotationAnswers] = useState<AnnotationAnswer[]>([])
   const [mcpServers, setMcpServers] = useState<McpServer[]>([])
   const [bots, setBots] = useState<Bot[]>([])
   const [allBindingCount, setAllBindingCount] = useState(0)
@@ -332,6 +423,7 @@ export default function WikiPage() {
   const [bindForm] = Form.useForm()
   const [draftForm] = Form.useForm()
   const [draftEditForm] = Form.useForm()
+  const [annotationForm] = Form.useForm()
 
   const wikiMcp = useMemo(() => mcpServers.find((server) => server.enabled && isWikiMcpServer(server)), [mcpServers])
   const wikiMcpCandidate = useMemo(() => mcpServers.find(isWikiMcpServer), [mcpServers])
@@ -366,7 +458,7 @@ export default function WikiPage() {
   const refreshNamespace = async (ns: WikiNamespace) => {
     setTreeLoading(true)
     try {
-      const [tree, nsHealth, bindingList, draftList, metricData, logData, missData] = await Promise.all([
+      const [tree, nsHealth, bindingList, draftList, metricData, logData, missData, feedbackData, feedbackMetricData, annotationData] = await Promise.all([
         wikiApi.listFiles(ns.name),
         wikiApi.namespaceHealth(ns.name),
         wikiApi.bindings(ns.name),
@@ -374,6 +466,16 @@ export default function WikiPage() {
         wikiApi.metrics(ns.name),
         wikiApi.retrievalLogs(ns.name),
         wikiApi.misses(ns.name),
+        wikiApi.feedback(ns.name, {
+          status: feedbackStatusFilter,
+          reason: feedbackReasonFilter,
+          contextId: feedbackContextFilter,
+          since: feedbackWindowDays === 0 ? 0 : Date.now() - feedbackWindowDays * 24 * 60 * 60 * 1000,
+        }),
+        wikiApi.feedbackMetrics(ns.name, {
+          since: feedbackWindowDays === 0 ? 0 : Date.now() - feedbackWindowDays * 24 * 60 * 60 * 1000,
+        }),
+        wikiApi.listAnnotationAnswers(ns.name),
       ])
       setFileTree(tree)
       setNamespaceHealth(nsHealth)
@@ -382,6 +484,9 @@ export default function WikiPage() {
       setMetrics(metricData)
       setRetrievalLogs(logData.logs ?? [])
       setMisses(missData.misses ?? [])
+      setFeedbackItems(feedbackData.items ?? [])
+      setFeedbackMetrics(feedbackMetricData.metrics ?? metricData.feedback ?? null)
+      setAnnotationAnswers(annotationData)
     } finally {
       setTreeLoading(false)
     }
@@ -396,6 +501,8 @@ export default function WikiPage() {
     setSearchAttempted(false)
     setTestResults([])
     setTestPreview(null)
+    setActiveFeedbackDetail(null)
+    setFeedbackDetailOpen(false)
     setActiveTab('documents')
     refreshNamespace(ns)
   }
@@ -698,6 +805,74 @@ export default function WikiPage() {
     refreshNamespace(selected)
   }
 
+  const openFeedbackDetail = async (item: WikiFeedbackItem) => {
+    if (!selected) return
+    setActiveFeedbackDetail(await wikiApi.feedbackDetail(selected.name, item.id))
+    setFeedbackDetailOpen(true)
+  }
+
+  const updateFeedback = async (item: WikiFeedbackItem, data: Record<string, unknown>, success = '反馈已更新') => {
+    if (!selected) return
+    await wikiApi.updateFeedback(selected.name, item.id, data)
+    message.success(success)
+    refreshNamespace(selected)
+  }
+
+  const ignoreFeedback = async (item: WikiFeedbackItem) => {
+    const reason = window.prompt('请输入忽略原因', item.resolutionNote ?? '无需处理')
+    if (reason === null) return
+    await updateFeedback(item, {
+      status: 'ignored',
+      classification: 'ignored',
+      resolutionNote: reason.trim() || '无需处理',
+    }, '已忽略')
+  }
+
+  const createDraftFromFeedback = async (item: WikiFeedbackItem) => {
+    if (!selected) return
+    const draft = await wikiApi.feedbackToDraft(selected.name, item.id, {
+      targetPath: item.assignedTargetPath || `feedback/${item.id}.md`,
+      mergeStrategy: 'append',
+    })
+    message.success('已转为 Wiki 草稿')
+    setActiveTab('drafts')
+    refreshNamespace(selected)
+    openDraftDetail(draft)
+  }
+
+  const createAnnotationFromFeedback = async (item: WikiFeedbackItem) => {
+    if (!selected) return
+    try {
+      await wikiApi.createAnnotationAnswerFromFeedback(selected.name, item.id)
+      message.success('已生成标注答案')
+      refreshNamespace(selected)
+    } catch (err: any) {
+      message.error(wikiErrorMessage(err, '请先在详情中补充审核后的答案'))
+    }
+  }
+
+  const handleCreateAnnotation = async (values: any) => {
+    if (!selected) return
+    await wikiApi.createAnnotationAnswer(selected.name, values)
+    message.success('标注答案已创建')
+    annotationForm.resetFields()
+    refreshNamespace(selected)
+  }
+
+  const toggleAnnotation = async (item: AnnotationAnswer) => {
+    if (!selected) return
+    await wikiApi.updateAnnotationAnswer(selected.name, item.id, { enabled: !item.enabled })
+    message.success(item.enabled ? '已禁用' : '已启用')
+    refreshNamespace(selected)
+  }
+
+  const deleteAnnotation = async (item: AnnotationAnswer) => {
+    if (!selected) return
+    await wikiApi.deleteAnnotationAnswer(selected.name, item.id)
+    message.success('已删除')
+    refreshNamespace(selected)
+  }
+
   const renderHealthItems = () => {
     const items = health?.items ?? {}
     const actionFor = (key: string) => {
@@ -945,6 +1120,149 @@ export default function WikiPage() {
     </Row>
   )
 
+  const feedbackTab = (
+    <Space direction="vertical" style={{ width: '100%' }} size={16}>
+      <Row gutter={16}>
+        <Col xs={24} md={6}><Card><Statistic title="反馈总数" value={feedbackMetrics?.total ?? 0} /></Card></Col>
+        <Col xs={24} md={6}><Card><Statistic title="负反馈" value={feedbackMetrics?.negative ?? 0} /></Card></Col>
+        <Col xs={24} md={6}><Card><Statistic title="待处理" value={feedbackMetrics?.pending ?? 0} /></Card></Col>
+        <Col xs={24} md={6}><Card><Statistic title="已转草稿" value={feedbackMetrics?.drafted ?? 0} /></Card></Col>
+      </Row>
+      <Card size="small" title="反馈收件箱">
+        <Space wrap style={{ marginBottom: 12 }}>
+          <Select
+            allowClear
+            placeholder="状态"
+            value={feedbackStatusFilter}
+            onChange={setFeedbackStatusFilter}
+            style={{ width: 140 }}
+            options={[
+              { label: '新反馈', value: 'new' },
+              { label: '已分流', value: 'triaged' },
+              { label: '已转草稿', value: 'drafted' },
+              { label: '已解决', value: 'resolved' },
+              { label: '已忽略', value: 'ignored' },
+              { label: '未关联', value: 'unlinked' },
+            ]}
+          />
+          <Select
+            allowClear
+            placeholder="负反馈原因"
+            value={feedbackReasonFilter}
+            onChange={setFeedbackReasonFilter}
+            style={{ width: 160 }}
+            options={[1, 2, 3, 4].map((reason) => ({ label: inaccurateReasonLabel(reason), value: reason }))}
+          />
+          <Select
+            allowClear
+            placeholder="上下文"
+            value={feedbackContextFilter}
+            onChange={setFeedbackContextFilter}
+            style={{ width: 180 }}
+            options={bindings.map((binding) => ({ label: binding.contextName, value: binding.contextId }))}
+          />
+          <Select
+            value={feedbackWindowDays}
+            onChange={setFeedbackWindowDays}
+            style={{ width: 130 }}
+            options={[
+              { label: '近 7 天', value: 7 },
+              { label: '近 30 天', value: 30 },
+              { label: '近 90 天', value: 90 },
+              { label: '全部时间', value: 0 },
+            ]}
+          />
+          <Button onClick={() => selected && refreshNamespace(selected)}>筛选</Button>
+        </Space>
+        {feedbackItems.length === 0 ? (
+          <Empty description="暂无反馈" />
+        ) : (
+          <List
+            dataSource={feedbackItems}
+            renderItem={(item) => (
+              <List.Item
+                actions={[
+                  <Button key="detail" size="small" onClick={() => openFeedbackDetail(item)}>详情</Button>,
+                  <Button key="draft" size="small" onClick={() => createDraftFromFeedback(item)}>转草稿</Button>,
+                  <Button key="annotation" size="small" onClick={() => createAnnotationFromFeedback(item)}>标注答案</Button>,
+                  <Button key="ignore" size="small" onClick={() => ignoreFeedback(item)}>忽略</Button>,
+                ]}
+              >
+                <List.Item.Meta
+                  title={
+                    <Space wrap>
+                      <Text>{item.responseRun?.questionPreview ?? item.content ?? '未关联反馈'}</Text>
+                      <Tag color={item.feedbackType === 2 ? 'red' : item.feedbackType === 1 ? 'green' : 'default'}>{feedbackTypeLabel(item.feedbackType)}</Tag>
+                      <Tag>{feedbackStatusLabel(item.status)}</Tag>
+                      <Tag color="blue">{feedbackClassificationLabel(item.classification)}</Tag>
+                    </Space>
+                  }
+                  description={
+                    <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                      <Text type="secondary">{formatTime(item.createdAt)}{item.responseRun?.contextId ? ` / ${item.responseRun.contextId}` : ''}</Text>
+                      {item.inaccurateReasons.length > 0 && <Text type="secondary">原因：{item.inaccurateReasons.map(inaccurateReasonLabel).join('、')}</Text>}
+                      {item.content && <Paragraph ellipsis={{ rows: 2, expandable: true }}>{item.content}</Paragraph>}
+                    </Space>
+                  }
+                />
+              </List.Item>
+            )}
+          />
+        )}
+      </Card>
+    </Space>
+  )
+
+  const annotationTab = (
+    <Row gutter={16}>
+      <Col xs={24} xl={9}>
+        <Card size="small" title="新建标注答案">
+          <Form form={annotationForm} layout="vertical" onFinish={handleCreateAnnotation}>
+            <Form.Item name="question" label="精确问题" rules={[{ required: true }]}>
+              <Input.TextArea rows={3} />
+            </Form.Item>
+            <Form.Item name="answer" label="标准答案" rules={[{ required: true }]}>
+              <Input.TextArea rows={8} />
+            </Form.Item>
+            <Form.Item name="contextId" label="限定上下文">
+              <Select allowClear options={bindings.map((binding) => ({ label: binding.contextName, value: binding.contextId }))} />
+            </Form.Item>
+            <Button type="primary" htmlType="submit">保存标注答案</Button>
+          </Form>
+        </Card>
+      </Col>
+      <Col xs={24} xl={15}>
+        <Card size="small" title="标注答案库">
+          {annotationAnswers.length === 0 ? <Empty description="暂无标注答案" /> : (
+            <List
+              dataSource={annotationAnswers}
+              renderItem={(item) => (
+                <List.Item
+                  actions={[
+                    <Button key="toggle" size="small" onClick={() => toggleAnnotation(item)}>{item.enabled ? '禁用' : '启用'}</Button>,
+                    <Popconfirm key="delete" title="确认删除此标注答案？" onConfirm={() => deleteAnnotation(item)}>
+                      <Button size="small" danger>删除</Button>
+                    </Popconfirm>,
+                  ]}
+                >
+                  <List.Item.Meta
+                    title={<Space wrap><Text>{item.question}</Text><Tag color={item.enabled ? 'green' : 'default'}>{item.enabled ? '启用' : '禁用'}</Tag><Tag>{item.hitCount} 命中</Tag></Space>}
+                    description={
+                      <Space direction="vertical" size={2} style={{ width: '100%' }}>
+                        <Paragraph ellipsis={{ rows: 3, expandable: true }}>{item.answer}</Paragraph>
+                        <Text type="secondary">来源：{sourceTypeLabel(item.sourceType)}{item.sourceRef ? ` / ${item.sourceRef}` : ''}{item.contextId ? ` / ${item.contextId}` : ''}</Text>
+                      </Space>
+                    }
+                  />
+                </List.Item>
+              )}
+            />
+          )}
+        </Card>
+      </Col>
+    </Row>
+  )
+
   const opsTab = (
     <Space direction="vertical" style={{ width: '100%' }} size={16}>
       <Row gutter={16}>
@@ -1084,6 +1402,8 @@ export default function WikiPage() {
                   { key: 'bindings', label: '绑定', children: bindingTab },
                   { key: 'health', label: '健康状态', children: healthTab },
                   { key: 'drafts', label: '知识草稿', children: draftsTab },
+                  { key: 'feedback', label: '反馈', children: feedbackTab },
+                  { key: 'annotations', label: '标注答案', children: annotationTab },
                   { key: 'ops', label: '运营', children: opsTab },
                 ]}
               />
@@ -1199,6 +1519,61 @@ export default function WikiPage() {
         </Form>
         <Divider />
         <Text type="secondary">当前 Wiki 根目录：{health?.wikiRoot || '未配置'}</Text>
+      </Modal>
+
+      <Modal
+        title="反馈详情"
+        open={feedbackDetailOpen}
+        width={900}
+        onCancel={() => { setFeedbackDetailOpen(false); setActiveFeedbackDetail(null) }}
+        footer={activeFeedbackDetail?.item ? [
+          <Button key="retrieval" onClick={() => updateFeedback(activeFeedbackDetail.item, { status: 'triaged', classification: 'retrieval_issue' }, '已标记为检索问题')}>检索问题</Button>,
+          <Button key="model" onClick={() => updateFeedback(activeFeedbackDetail.item, { status: 'triaged', classification: 'model_or_tool_issue' }, '已标记为模型/工具问题')}>模型/工具问题</Button>,
+          <Button key="ignore" onClick={() => ignoreFeedback(activeFeedbackDetail.item)}>忽略</Button>,
+          <Button key="draft" type="primary" onClick={() => createDraftFromFeedback(activeFeedbackDetail.item)}>转 Wiki 草稿</Button>,
+        ] : null}
+      >
+        {activeFeedbackDetail?.item && (
+          <Space direction="vertical" style={{ width: '100%' }} size={12}>
+            <Descriptions size="small" column={2}>
+              <Descriptions.Item label="反馈类型">{feedbackTypeLabel(activeFeedbackDetail.item.feedbackType)}</Descriptions.Item>
+              <Descriptions.Item label="状态">{feedbackStatusLabel(activeFeedbackDetail.item.status)}</Descriptions.Item>
+              <Descriptions.Item label="分类">{feedbackClassificationLabel(activeFeedbackDetail.item.classification)}</Descriptions.Item>
+              <Descriptions.Item label="时间">{formatTime(activeFeedbackDetail.item.createdAt)}</Descriptions.Item>
+              <Descriptions.Item label="原因" span={2}>{activeFeedbackDetail.item.inaccurateReasons?.map(inaccurateReasonLabel).join('、') || '无'}</Descriptions.Item>
+              <Descriptions.Item label="用户补充" span={2}>{activeFeedbackDetail.item.content || '无'}</Descriptions.Item>
+            </Descriptions>
+            <Card size="small" title="原问题与回答">
+              <Paragraph strong>{activeFeedbackDetail.evidence?.responseRun?.questionPreview ?? '暂无问题'}</Paragraph>
+              <Paragraph style={{ whiteSpace: 'pre-wrap' }}>{activeFeedbackDetail.evidence?.responseRun?.answerPreview ?? '暂无回答'}</Paragraph>
+            </Card>
+            <Card size="small" title="关联会话">
+              {(activeFeedbackDetail.evidence?.sessionMessages ?? []).length === 0 ? <Empty description="暂无会话消息" /> : (
+                <List
+                  size="small"
+                  dataSource={activeFeedbackDetail.evidence.sessionMessages}
+                  renderItem={(msg: any) => <List.Item><Tag>{msg.role}</Tag><Text>{typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}</Text></List.Item>}
+                />
+              )}
+            </Card>
+            <Card size="small" title="检索证据">
+              {(activeFeedbackDetail.evidence?.retrievalLogs ?? []).length === 0 ? <Empty description="暂无检索证据" /> : (
+                <List
+                  size="small"
+                  dataSource={activeFeedbackDetail.evidence.retrievalLogs}
+                  renderItem={(log: RetrievalLog) => (
+                    <List.Item>
+                      <List.Item.Meta
+                        title={<Space><Tag>{policyLabel(log.policy)}</Tag><Text>{log.query}</Text><Tag>{log.hitCount} 命中</Tag></Space>}
+                        description={<Space wrap>{log.hitPaths.map((path) => <Tag key={path}>{path}</Tag>)}{log.error && <Tag color="red">{log.error}</Tag>}</Space>}
+                      />
+                    </List.Item>
+                  )}
+                />
+              )}
+            </Card>
+          </Space>
+        )}
       </Modal>
 
       <Modal

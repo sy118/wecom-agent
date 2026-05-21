@@ -1,10 +1,14 @@
+import { randomUUID } from 'crypto'
 import type { Client } from '@libsql/client'
 import type { StructuredTool } from '@langchain/core/tools'
 import { AgentEngine, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpTools, createSkillTools } from '@wecom-platform/core'
 import { SessionStore } from '../session-store.js'
 import { SkillAuditRepository } from '../db/skill-audit-repository.js'
 import { WikiRetrievalLogRepository } from '../db/wiki-retrieval-log-repository.js'
-import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, SessionMessage } from '@wecom-platform/types'
+import { BotResponseRunRepository } from '../db/bot-response-run-repository.js'
+import { AnnotationAnswerRepository } from '../db/annotation-answer-repository.js'
+import { handleIncomingWecomEvent } from '../services/wecom-event-service.js'
+import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, IncomingEvent, Session, SessionMessage, BotResponseRun } from '@wecom-platform/types'
 
 const QUEUE_BACKPRESSURE_LIMIT = 10
 const BUSY_MESSAGE = '当前处理队列繁忙，请稍后再试'
@@ -16,6 +20,11 @@ const EMPTY_RESPONSE_FALLBACK = '抱歉，我暂时无法生成有效回复，�
 
 function safeReply(text: string): string {
   return text.trim() || EMPTY_RESPONSE_FALLBACK
+}
+
+function contentText(content: string | IncomingContent[]): string {
+  if (typeof content === 'string') return content
+  return content.map((item) => (item.type === 'text' ? item.text : `[图片: ${item.url}]`)).join('\n')
 }
 
 export function isVisionFallbackError(err: unknown): boolean {
@@ -139,6 +148,7 @@ export class BotInstance {
     }
 
     this.adapter.onMessage((msg) => this.handleMessage(msg))
+    this.adapter.onEvent((event) => this.handleEvent(event))
     await this.adapter.start()
   }
 
@@ -173,6 +183,15 @@ export class BotInstance {
   }
 
   addBinding(chatKey: string, contextId: string): void {
+    this.bindingMap.set(chatKey, contextId)
+    this.discoveredChats.delete(chatKey)
+  }
+
+  removeBinding(chatKey: string): void {
+    this.bindingMap.delete(chatKey)
+  }
+
+  updateBinding(chatKey: string, contextId: string): void {
     this.bindingMap.set(chatKey, contextId)
     this.discoveredChats.delete(chatKey)
   }
@@ -244,6 +263,14 @@ export class BotInstance {
     return msg.content.map((c) => (c.type === 'text' ? c.text : '[图片]')).join('\n')
   }
 
+  private async handleEvent(event: IncomingEvent): Promise<void> {
+    try {
+      await handleIncomingWecomEvent(event, { botId: this.deps.bot.id, contexts: this.deps.contexts })
+    } catch (err) {
+      console.error(`[BotInstance:${this.deps.bot.id}] Failed to handle WeCom event ${event.eventType}:`, err)
+    }
+  }
+
   private async handleMessage(msg: IncomingMessage): Promise<void> {
     const body = msg.rawBody as any
     const msgId: string = body?.msgid
@@ -291,15 +318,25 @@ export class BotInstance {
 
       const session = await this.sessions.getOrCreate(chatKey, context.id, context.sessionTtlMin)
       const { streamingMode } = this.deps.bot
+      const responseRun = await this.createResponseRun(context, session, chatKey, chatId, msg.userId, content)
+      const annotation = await this.findAnnotationAnswer(context, content)
+      if (annotation) {
+        await AnnotationAnswerRepository.recordHit(annotation.id)
+        const answer = safeReply(annotation.answer)
+        await this.saveMessages(chatKey, content, answer, responseRun.id)
+        await BotResponseRunRepository.markSent(responseRun.id, answer)
+        await this.sendTrackedStaticReply(chatId, answer, responseRun, frame)
+        return
+      }
 
       if (this.deps.bot.provider === 'dify') {
         if (shouldSkipRuntimeToolsForDify(this.deps.bot.provider, context.mcpConfigs ?? [], context.skillConfigs ?? [])) {
           console.log(`[BotInstance:${this.deps.bot.id}] Dify provider skips MCP/Skill runtime tools`)
         }
         if (streamingMode === 'none') {
-          await this.handleDify(chatId, chatKey, content, session.difyConversationId ?? null)
+          await this.handleDify(chatId, chatKey, content, session.difyConversationId ?? null, undefined, frame, responseRun)
         } else {
-          await this.handleDifyStreaming(chatId, chatKey, content, session.difyConversationId ?? null, frame)
+          await this.handleDifyStreaming(chatId, chatKey, content, session.difyConversationId ?? null, frame, responseRun)
         }
         return
       }
@@ -314,16 +351,110 @@ export class BotInstance {
       const promptWithForcedResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content, {
         contextId: context.id,
         chatKey,
+        responseRunId: responseRun.id,
       })
 
       if (streamingMode === 'progressive') {
-        await this.handleProgressive(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame)
+        await this.handleProgressive(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
       } else if (streamingMode === 'typewriter') {
-        await this.handleTypewriter(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame)
+        await this.handleTypewriter(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
       } else {
-        await this.handleNone(chatId, chatKey, content, session.messages, promptWithForcedResults, tools)
+        await this.handleNone(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
       }
     })
+  }
+
+  private async createResponseRun(
+    context: ContextConfig,
+    session: Session,
+    chatKey: string,
+    chatId: string,
+    userId: string,
+    content: string | IncomingContent[]
+  ): Promise<BotResponseRun> {
+    return BotResponseRunRepository.create({
+      feedbackId: randomUUID(),
+      botId: this.deps.bot.id,
+      contextId: context.id,
+      sessionId: session.id,
+      chatKey,
+      chatId,
+      userId,
+      questionPreview: contentText(content),
+      provider: this.deps.bot.provider,
+      model: this.deps.bot.provider === 'dify'
+        ? this.deps.bot.difyAppId ?? this.deps.bot.llmModel
+        : this.deps.bot.llmModel,
+      feedbackAvailable: true,
+    })
+  }
+
+  private async findAnnotationAnswer(context: ContextConfig, content: string | IncomingContent[]) {
+    const question = contentText(content)
+    if (!question.trim()) return null
+    return AnnotationAnswerRepository.findMatch(question, {
+      contextId: context.id,
+      namespace: firstWikiNamespaceFromConfigs(context.mcpConfigs ?? []),
+    })
+  }
+
+  private async sendTrackedStaticReply(
+    chatId: string,
+    text: string,
+    responseRun: BotResponseRun,
+    frame?: any
+  ): Promise<void> {
+    if (frame && responseRun.feedbackId) {
+      try {
+        const streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
+        await this.adapter.editMessage(chatId, streamId, text, true)
+        return
+      } catch (err) {
+        console.warn(`[BotInstance:${this.deps.bot.id}] Feedback reply stream unavailable:`, err)
+      }
+    }
+    await this.adapter.sendMessage(chatId, text).catch(() => {})
+    await BotResponseRunRepository.markFeedbackUnavailable(
+      responseRun.id,
+      frame ? 'feedback stream unavailable; sent as proactive message' : 'no callback frame for feedback-enabled reply'
+    )
+  }
+
+  private async finishTrackedReply(
+    chatId: string,
+    text: string,
+    responseRun: BotResponseRun,
+    streamId?: string
+  ): Promise<void> {
+    if (streamId) {
+      try {
+        await this.adapter.editMessage(chatId, streamId, text, true)
+        return
+      } catch (err) {
+        console.warn(`[BotInstance:${this.deps.bot.id}] Failed to finish feedback stream:`, err)
+      }
+    }
+    await this.adapter.sendMessage(chatId, text).catch(() => {})
+    await BotResponseRunRepository.markFeedbackUnavailable(
+      responseRun.id,
+      streamId ? 'feedback stream finish failed; sent fallback message' : 'no feedback-capable stream'
+    )
+  }
+
+  private async sendRunErrorReply(
+    chatId: string,
+    text: string,
+    responseRun: BotResponseRun,
+    streamId?: string
+  ): Promise<void> {
+    await BotResponseRunRepository.markError(responseRun.id, text)
+    if (streamId) {
+      await this.adapter.editMessage(chatId, streamId, text, true).catch(async () => {
+        await this.adapter.sendMessage(chatId, text).catch(() => {})
+      })
+      return
+    }
+    await this.adapter.sendMessage(chatId, text).catch(() => {})
   }
 
   /** Resolve tools from toolPool based on context mcpConfigs */
@@ -388,7 +519,7 @@ export class BotInstance {
     systemPrompt: string,
     mcpConfigs: McpConfig[],
     content: string | IncomingContent[],
-    runtimeMeta: { contextId?: string; chatKey?: string } = {}
+    runtimeMeta: { contextId?: string; chatKey?: string; responseRunId?: string } = {}
   ): Promise<string> {
     const results: string[] = []
     const FORCE_CALL_TIMEOUT_MS = 55_000
@@ -514,6 +645,7 @@ export class BotInstance {
     error?: string
     contextId?: string
     chatKey?: string
+    responseRunId?: string
   }): Promise<void> {
     if (!data.namespace) return
     try {
@@ -521,6 +653,7 @@ export class BotInstance {
         botId: this.deps.bot.id,
         contextId: data.contextId ?? null,
         chatKey: data.chatKey ?? null,
+        responseRunId: data.responseRunId ?? null,
         namespace: data.namespace,
         policy: data.policy,
         query: data.query,
@@ -540,16 +673,22 @@ export class BotInstance {
     content: string | IncomingContent[],
     sessionMessages: any[],
     systemPrompt: string,
-    tools: StructuredTool[]
+    tools: StructuredTool[],
+    frame: any | undefined,
+    responseRun: BotResponseRun
   ): Promise<void> {
     await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
     try {
       const response = safeReply(await this.engine!.invokeWithTools(sessionMessages, content, systemPrompt, tools))
-      await this.saveMessages(chatKey, content, response)
-      await this.adapter.sendMessage(chatId, response).catch(() => {})
+      await this.saveMessages(chatKey, content, response, responseRun.id)
+      await BotResponseRunRepository.markSent(responseRun.id, response)
+      await this.sendTrackedStaticReply(chatId, response, responseRun, frame)
     } catch (err: any) {
       if (err instanceof RecursionLimitError) {
-        await this.adapter.sendMessage(chatId, err.summary).catch(() => {})
+        const response = safeReply(err.summary)
+        await this.saveMessages(chatKey, content, response, responseRun.id)
+        await BotResponseRunRepository.markSent(responseRun.id, response)
+        await this.sendTrackedStaticReply(chatId, response, responseRun, frame)
         return
       }
       // Vision fallback: if LLM rejects multimodal input (400/422), retry with text-only degradation
@@ -558,15 +697,16 @@ export class BotInstance {
         console.warn(`[BotInstance:${this.deps.bot.id}] Vision error ${status}, retrying with text degradation`)
         try {
           const response = await invokeVisionFallback(this.engine!, sessionMessages, content, systemPrompt, tools)
-          await this.saveMessages(chatKey, degradeVisionContent(content), response)
-          await this.adapter.sendMessage(chatId, response).catch(() => {})
+          await this.saveMessages(chatKey, degradeVisionContent(content), response, responseRun.id)
+          await BotResponseRunRepository.markSent(responseRun.id, response)
+          await this.sendTrackedStaticReply(chatId, response, responseRun, frame)
           return
         } catch {
           // fall through to generic error
         }
       }
       console.error(`[BotInstance:${this.deps.bot.id}] Agent error:`, err)
-      await this.adapter.sendMessage(chatId, '处理消息时发生错误，请稍后重试。').catch(() => {})
+      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun)
     }
   }
 
@@ -577,12 +717,13 @@ export class BotInstance {
     sessionMessages: any[],
     systemPrompt: string,
     tools: StructuredTool[],
-    frame?: any
+    frame: any | undefined,
+    responseRun: BotResponseRun
   ): Promise<void> {
     let streamId: string | undefined
     if (frame) {
       try {
-        streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE)
+        streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
       } catch {
         streamId = undefined
       }
@@ -593,27 +734,16 @@ export class BotInstance {
     }
 
     try {
-      const response = await this.engine!.invokeWithTools(sessionMessages, content, systemPrompt, tools)
-      await this.saveMessages(chatKey, content, response)
-
-      if (streamId) {
-        try {
-          await this.adapter.editMessage(chatId, streamId, response, true)
-          return
-        } catch {
-          // fallback
-        }
-      }
-      await this.adapter.sendMessage(chatId, response).catch(() => {})
+      const response = safeReply(await this.engine!.invokeWithTools(sessionMessages, content, systemPrompt, tools))
+      await this.saveMessages(chatKey, content, response, responseRun.id)
+      await BotResponseRunRepository.markSent(responseRun.id, response)
+      await this.finishTrackedReply(chatId, response, responseRun, streamId)
     } catch (err: any) {
       if (err instanceof RecursionLimitError) {
-        if (streamId) {
-          await this.adapter.editMessage(chatId, streamId, err.summary, true).catch(async () => {
-            await this.adapter.sendMessage(chatId, err.summary).catch(() => {})
-          })
-        } else {
-          await this.adapter.sendMessage(chatId, err.summary).catch(() => {})
-        }
+        const response = safeReply(err.summary)
+        await this.saveMessages(chatKey, content, response, responseRun.id)
+        await BotResponseRunRepository.markSent(responseRun.id, response)
+        await this.finishTrackedReply(chatId, response, responseRun, streamId)
         return
       }
       if (Array.isArray(content) && isVisionFallbackError(err)) {
@@ -621,16 +751,9 @@ export class BotInstance {
         console.warn(`[BotInstance:${this.deps.bot.id}] Vision error ${status}, retrying with text degradation`)
         try {
           const response = await invokeVisionFallback(this.engine!, sessionMessages, content, systemPrompt, tools)
-          await this.saveMessages(chatKey, degradeVisionContent(content), response)
-
-          if (streamId) {
-            await this.adapter.editMessage(chatId, streamId, response, true).catch(async () => {
-              await this.adapter.sendMessage(chatId, response).catch(() => {})
-            })
-            return
-          }
-
-          await this.adapter.sendMessage(chatId, response).catch(() => {})
+          await this.saveMessages(chatKey, degradeVisionContent(content), response, responseRun.id)
+          await BotResponseRunRepository.markSent(responseRun.id, response)
+          await this.finishTrackedReply(chatId, response, responseRun, streamId)
           return
         } catch {
           // fall through to generic error
@@ -638,7 +761,7 @@ export class BotInstance {
       }
 
       console.error(`[BotInstance:${this.deps.bot.id}] Agent error:`, err)
-      await this.adapter.sendMessage(chatId, '处理消息时发生错误，请稍后重试。').catch(() => {})
+      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun, streamId)
     }
   }
 
@@ -649,22 +772,23 @@ export class BotInstance {
     sessionMessages: any[],
     systemPrompt: string,
     tools: StructuredTool[],
-    frame?: any
+    frame: any | undefined,
+    responseRun: BotResponseRun
   ): Promise<void> {
     if (!frame) {
-      await this.handleNone(chatId, chatKey, content, sessionMessages, systemPrompt, tools)
+      await this.handleNone(chatId, chatKey, content, sessionMessages, systemPrompt, tools, undefined, responseRun)
       return
     }
 
     let streamId: string | undefined
     try {
-      streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE)
+      streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
     } catch {
       streamId = undefined
     }
 
     if (!streamId) {
-      await this.handleNone(chatId, chatKey, content, sessionMessages, systemPrompt, tools)
+      await this.handleNone(chatId, chatKey, content, sessionMessages, systemPrompt, tools, frame, responseRun)
       return
     }
 
@@ -687,16 +811,15 @@ export class BotInstance {
         },
       }))
 
-      await this.saveMessages(chatKey, content, finalResponse)
-      await this.adapter.editMessage(chatId, streamId, finalResponse, true).catch(async () => {
-        await this.adapter.sendMessage(chatId, finalResponse).catch(() => {})
-      })
+      await this.saveMessages(chatKey, content, finalResponse, responseRun.id)
+      await BotResponseRunRepository.markSent(responseRun.id, finalResponse)
+      await this.finishTrackedReply(chatId, finalResponse, responseRun, streamId)
     } catch (err: any) {
       if (err instanceof RecursionLimitError) {
-        const reply = accumulated.trim() || err.summary
-        await this.adapter.editMessage(chatId, streamId, reply, true).catch(async () => {
-          await this.adapter.sendMessage(chatId, reply).catch(() => {})
-        })
+        const response = safeReply(accumulated.trim() || err.summary)
+        await this.saveMessages(chatKey, content, response, responseRun.id)
+        await BotResponseRunRepository.markSent(responseRun.id, response)
+        await this.finishTrackedReply(chatId, response, responseRun, streamId)
         return
       }
       if (Array.isArray(content) && isVisionFallbackError(err)) {
@@ -704,10 +827,9 @@ export class BotInstance {
         console.warn(`[BotInstance:${this.deps.bot.id}] Vision error ${status}, retrying with text degradation`)
         try {
           const response = await invokeVisionFallback(this.engine!, sessionMessages, content, systemPrompt, tools)
-          await this.saveMessages(chatKey, degradeVisionContent(content), response)
-          await this.adapter.editMessage(chatId, streamId, response, true).catch(async () => {
-            await this.adapter.sendMessage(chatId, response).catch(() => {})
-          })
+          await this.saveMessages(chatKey, degradeVisionContent(content), response, responseRun.id)
+          await BotResponseRunRepository.markSent(responseRun.id, response)
+          await this.finishTrackedReply(chatId, response, responseRun, streamId)
           return
         } catch {
           // fall through to generic error
@@ -715,9 +837,7 @@ export class BotInstance {
       }
 
       console.error(`[BotInstance:${this.deps.bot.id}] Agent error:`, err)
-      await this.adapter.editMessage(chatId, streamId, '处理消息时发生错误，请稍后重试。', true).catch(async () => {
-        await this.adapter.sendMessage(chatId, '处理消息时发生错误，请稍后重试。').catch(() => {})
-      })
+      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun, streamId)
     }
   }
 
@@ -726,29 +846,29 @@ export class BotInstance {
     chatKey: string,
     content: string | IncomingContent[],
     conversationId: string | null,
-    streamId?: string
+    streamId: string | undefined,
+    frame: any | undefined,
+    responseRun: BotResponseRun
   ): Promise<void> {
-    if (!streamId) await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
+    let replyStreamId = streamId
+    if (!replyStreamId && frame) {
+      try {
+        replyStreamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
+      } catch {
+        replyStreamId = undefined
+      }
+    }
+    if (!replyStreamId) await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
     try {
       const result = await this.difyClient!.chat(content, conversationId, chatKey)
       const answer = safeReply(result.answer)
       await this.sessions.setDifyConversationId(chatKey, result.conversationId)
-      if (streamId) {
-        await this.adapter.editMessage(chatId, streamId, answer, true).catch(async () => {
-          await this.adapter.sendMessage(chatId, answer).catch(() => {})
-        })
-      } else {
-        await this.adapter.sendMessage(chatId, answer).catch(() => {})
-      }
+      await this.saveMessages(chatKey, content, answer, responseRun.id)
+      await BotResponseRunRepository.markSent(responseRun.id, answer, { difyConversationId: result.conversationId })
+      await this.finishTrackedReply(chatId, answer, responseRun, replyStreamId)
     } catch (err) {
       console.error(`[BotInstance:${this.deps.bot.id}] Dify error:`, err)
-      if (streamId) {
-        await this.adapter.editMessage(chatId, streamId, '处理消息时发生错误，请稍后重试。', true).catch(async () => {
-          await this.adapter.sendMessage(chatId, '处理消息时发生错误，请稍后重试。').catch(() => {})
-        })
-      } else {
-        await this.adapter.sendMessage(chatId, '处理消息时发生错误，请稍后重试。').catch(() => {})
-      }
+      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun, replyStreamId)
     }
   }
 
@@ -757,22 +877,23 @@ export class BotInstance {
     chatKey: string,
     content: string | IncomingContent[],
     conversationId: string | null,
-    frame?: any
+    frame: any | undefined,
+    responseRun: BotResponseRun
   ): Promise<void> {
     if (!frame) {
-      await this.handleDify(chatId, chatKey, content, conversationId)
+      await this.handleDify(chatId, chatKey, content, conversationId, undefined, undefined, responseRun)
       return
     }
 
     let streamId: string | undefined
     try {
-      streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE)
+      streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
     } catch {
       streamId = undefined
     }
 
     if (!streamId) {
-      await this.handleDify(chatId, chatKey, content, conversationId)
+      await this.handleDify(chatId, chatKey, content, conversationId, undefined, frame, responseRun)
       return
     }
 
@@ -797,24 +918,25 @@ export class BotInstance {
       })
       const answer = safeReply(result.answer)
       await this.sessions.setDifyConversationId(chatKey, result.conversationId)
-      await this.adapter.editMessage(chatId, streamId, answer, true).catch(async () => {
-        await this.adapter.sendMessage(chatId, answer).catch(() => {})
-      })
+      await this.saveMessages(chatKey, content, answer, responseRun.id)
+      await BotResponseRunRepository.markSent(responseRun.id, answer, { difyConversationId: result.conversationId })
+      await this.finishTrackedReply(chatId, answer, responseRun, streamId)
     } catch (err) {
       console.error(`[BotInstance:${this.deps.bot.id}] Dify streaming error:`, err)
+      await BotResponseRunRepository.markError(responseRun.id, err instanceof Error ? err.message : String(err))
       if (streamStarted) {
         await this.adapter.editMessage(chatId, streamId, `${accumulated}\n\n处理消息时发生错误，请稍后重试。`, true).catch(() => {})
         return
       }
       await this.adapter.editMessage(chatId, streamId, '流式连接失败，正在切换为普通回复...', false).catch(() => {})
-      await this.handleDify(chatId, chatKey, content, conversationId, streamId)
+      await this.handleDify(chatId, chatKey, content, conversationId, streamId, undefined, responseRun)
     }
   }
 
-  private async saveMessages(chatKey: string, content: string | IncomingContent[], response: string): Promise<void> {
+  private async saveMessages(chatKey: string, content: string | IncomingContent[], response: string, responseRunId?: string | null): Promise<void> {
     const contentStr = typeof content === 'string' ? content : JSON.stringify(content)
-    await this.sessions.addMessage(chatKey, { role: 'human', content: contentStr, timestamp: Date.now() })
-    await this.sessions.addMessage(chatKey, { role: 'ai', content: response, timestamp: Date.now() })
+    await this.sessions.addMessage(chatKey, { role: 'human', content: contentStr, timestamp: Date.now(), responseRunId }, responseRunId)
+    await this.sessions.addMessage(chatKey, { role: 'ai', content: response, timestamp: Date.now(), responseRunId }, responseRunId)
   }
 
   private getOrCreateQueue(chatKey: string): MessageQueue {
@@ -843,6 +965,20 @@ function injectWikiNamespace(systemPrompt: string, mcpConfigs: McpConfig[]): str
   const marker = '## Wiki 知识库'
   if (systemPrompt.includes(marker)) return systemPrompt
   return `${systemPrompt}\n\n## Wiki 知识库\n${nsText}`
+}
+
+function firstWikiNamespaceFromConfigs(mcpConfigs: McpConfig[]): string | null {
+  for (const cfg of mcpConfigs) {
+    if (!cfg.enabled) continue
+    const ns = cfg.params?.namespace
+    if (Array.isArray(ns)) {
+      const first = ns.find((item): item is string => typeof item === 'string' && Boolean(item))
+      if (first) return first
+    } else if (typeof ns === 'string' && ns) {
+      return ns
+    }
+  }
+  return null
 }
 
 function isWikiReadHit(output: string): boolean {

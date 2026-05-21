@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import { db } from './client.js'
+import { getEnvDefaultSessionTtlMin } from '../config/session-ttl.js'
 import type { ContextConfig, McpConfig, SkillConfig } from '@wecom-platform/types'
 import type { InValue } from '@libsql/client'
 
@@ -52,6 +53,7 @@ export const ContextRepository = {
   async create(data: Omit<ContextConfig, 'id' | 'createdAt' | 'updatedAt'>): Promise<ContextConfig> {
     const id = randomUUID()
     const now = Date.now()
+    const sessionTtlMin = data.sessionTtlMin ?? getEnvDefaultSessionTtlMin()
     if (data.isDefault) {
       await db.execute({ sql: 'UPDATE contexts SET is_default = 0, updated_at = ? WHERE bot_id = ? AND is_default = 1', args: [now, data.botId] })
     }
@@ -65,7 +67,7 @@ export const ContextRepository = {
         data.systemPrompt,
         JSON.stringify(data.mcpConfigs ?? []),
         JSON.stringify(data.skillConfigs ?? []),
-        data.sessionTtlMin,
+        sessionTtlMin,
         data.isDefault ? 1 : 0,
         now,
         now,
