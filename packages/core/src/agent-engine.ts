@@ -26,13 +26,22 @@ const DEFAULT_TIMEOUT_MS = 120_000
 const DEFAULT_RECURSION_LIMIT = 50
 const EMPTY_RESPONSE_FALLBACK = '抱歉，我暂时无法生成有效回复，请稍后重试。'
 
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  return Promise.race([
-    promise,
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`Agent invoke timed out after ${ms / 1000}s`)), ms)
-    ),
-  ])
+async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
+  const controller = new AbortController()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      run(controller.signal),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort()
+          reject(new Error(`Agent invoke timed out after ${ms / 1000}s`))
+        }, ms)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
 }
 
 export interface StreamCallbacks {
@@ -201,15 +210,20 @@ export class AgentEngine {
 
     try {
       await withTimeout(
-        (async () => {
+        async (signal) => {
           const stream = await agent.stream(
             { messages: history },
-            { streamMode: 'messages', callbacks: [logHandler], ...this.runtimeOptions() }
-          )
-          for await (const [msg] of stream) {
-            if (msg) collectedMessages.push(msg as BaseMessage)
+            { streamMode: 'messages', callbacks: [logHandler], ...this.runtimeOptions(), signal } as any
+          ) as unknown as AsyncIterable<[unknown]> & { return?: () => Promise<unknown> }
+          try {
+            for await (const [msg] of stream) {
+              if (signal.aborted) break
+              if (msg) collectedMessages.push(msg as BaseMessage)
+            }
+          } finally {
+            await (stream as any).return?.().catch?.(() => {})
           }
-        })(),
+        },
         timeoutMs
       )
     } catch (err) {
@@ -273,15 +287,20 @@ export class AgentEngine {
 
     try {
       await withTimeout(
-        (async () => {
+        async (signal) => {
           const stream = await agent.stream(
             { messages: history },
-            { streamMode: 'messages', callbacks: [handler], ...this.runtimeOptions() }
-          )
-          for await (const [msg] of stream) {
-            if (msg) collectedMessages.push(msg as BaseMessage)
+            { streamMode: 'messages', callbacks: [handler], ...this.runtimeOptions(), signal } as any
+          ) as unknown as AsyncIterable<[unknown]> & { return?: () => Promise<unknown> }
+          try {
+            for await (const [msg] of stream) {
+              if (signal.aborted) break
+              if (msg) collectedMessages.push(msg as BaseMessage)
+            }
+          } finally {
+            await (stream as any).return?.().catch?.(() => {})
           }
-        })(),
+        },
         timeoutMs
       )
     } catch (err) {

@@ -1,7 +1,8 @@
 import { randomUUID } from 'crypto'
 import type { Client } from '@libsql/client'
 import type { StructuredTool } from '@langchain/core/tools'
-import { AgentEngine, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpTools, createSkillTools } from '@wecom-platform/core'
+import { AgentEngine, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpToolClient, createSkillTools } from '@wecom-platform/core'
+import type { McpToolClient } from '@wecom-platform/core'
 import { SessionStore } from '../session-store.js'
 import { SkillAuditRepository } from '../db/skill-audit-repository.js'
 import { WikiRetrievalLogRepository } from '../db/wiki-retrieval-log-repository.js'
@@ -85,6 +86,7 @@ export class BotInstance {
   private engine: AgentEngine | null = null
   private difyClient: DifyClient | null = null
   private toolPool = new Map<string, StructuredTool[]>() // mcpServerId → tools
+  private toolClients = new Map<string, McpToolClient>()
   private skillToolPool = new Map<string, SkillDefinition>()
   private queues = new Map<string, MessageQueue>()
   private sessions: SessionStore
@@ -129,7 +131,7 @@ export class BotInstance {
           provider: bot.provider,
         },
         systemPrompt: '',
-        timeoutMs: 500_000,
+        timeoutMs: process.env.AGENT_TIMEOUT_MS ? Number(process.env.AGENT_TIMEOUT_MS) : undefined,
         recursionLimit: process.env.AGENT_RECURSION_LIMIT ? Number(process.env.AGENT_RECURSION_LIMIT) : undefined,
       })
       await this.engine.initialize()
@@ -138,8 +140,9 @@ export class BotInstance {
       for (const server of mcpServers) {
         if (!server.enabled) continue
         try {
-          const tools = await createMcpTools([server])
-          this.toolPool.set(server.id, tools)
+          const toolClient = await createMcpToolClient(server)
+          this.toolPool.set(server.id, toolClient.tools)
+          this.toolClients.set(server.id, toolClient)
         } catch (err) {
           console.error(`[BotInstance:${bot.id}] Failed to load tools from ${server.name}:`, err)
         }
@@ -158,6 +161,7 @@ export class BotInstance {
     this.queues.clear()
     this.processedMsgs.clear()
     this.discoveredChats.clear()
+    await this.closeMcpToolClients()
     this.toolPool.clear()
     this.skillToolPool.clear()
   }
@@ -221,14 +225,16 @@ export class BotInstance {
 
   async reloadMcpServers(mcpServers: McpServerConfig[]): Promise<void> {
     this.deps.mcpServers = mcpServers
+    await this.closeMcpToolClients()
     this.toolPool.clear()
     if (this.deps.bot.provider === 'dify') return
 
     for (const server of mcpServers) {
       if (!server.enabled) continue
       try {
-        const tools = await createMcpTools([server])
-        this.toolPool.set(server.id, tools)
+        const toolClient = await createMcpToolClient(server)
+        this.toolPool.set(server.id, toolClient.tools)
+        this.toolClients.set(server.id, toolClient)
       } catch (err) {
         console.error(`[BotInstance:${this.deps.bot.id}] Failed to reload tools from ${server.name}:`, err)
       }
@@ -506,13 +512,32 @@ export class BotInstance {
     return merged
   }
 
-  private async invokeWithTimeout<T>(tool: { invoke: (args: unknown) => Promise<T> }, args: unknown, timeoutMs: number): Promise<T> {
-    return Promise.race([
-      tool.invoke(args),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error(`Tool invoke timed out after ${timeoutMs}ms`)), timeoutMs)
-      ),
-    ])
+  private async invokeWithTimeout<T>(
+    tool: { invoke: (args: unknown, config?: { signal?: AbortSignal }) => Promise<T> },
+    args: unknown,
+    timeoutMs: number
+  ): Promise<T> {
+    const controller = new AbortController()
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      return await Promise.race([
+        tool.invoke(args, { signal: controller.signal }),
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => {
+            controller.abort()
+            reject(new Error(`Tool invoke timed out after ${timeoutMs}ms`))
+          }, timeoutMs)
+        }),
+      ])
+    } finally {
+      if (timeout) clearTimeout(timeout)
+    }
+  }
+
+  private async closeMcpToolClients(): Promise<void> {
+    const clients = [...this.toolClients.values()]
+    this.toolClients.clear()
+    await Promise.allSettled(clients.map((client) => client.close()))
   }
 
   private async executeForceCallMcps(

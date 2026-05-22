@@ -7,6 +7,46 @@ import type { McpServerConfig } from '@wecom-platform/types'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 
 const variablePattern = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
+const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
+const DEFAULT_LOAD_TOOLS_TIMEOUT_MS = 20_000
+const DEFAULT_TOOL_TIMEOUT_MS = 60_000
+
+export interface McpToolClient {
+  serverId: string
+  serverName: string
+  tools: Awaited<ReturnType<typeof loadMcpTools>>
+  close: () => Promise<void>
+}
+
+export interface CreateMcpToolClientOptions {
+  connectTimeoutMs?: number
+  loadToolsTimeoutMs?: number
+  toolTimeoutMs?: number
+}
+
+function configuredTimeout(envKey: string, fallback: number): number {
+  const raw = process.env[envKey]
+  if (!raw) return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string, onTimeout?: () => void | Promise<void>): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          void onTimeout?.()
+          reject(new Error(`${label} timed out after ${ms}ms`))
+        }, ms)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+  }
+}
 
 function resolveTemplate(value: string): string {
   return value.replace(variablePattern, (_, variableName: string) => {
@@ -21,7 +61,9 @@ function resolveStringRecord(record: Record<string, string> | undefined): Record
 }
 
 function processEnvironment(): Record<string, string> {
-  return Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
+  const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined))
+  if (process.env.PATH !== undefined && env.PATH === undefined) env.PATH = process.env.PATH
+  return env
 }
 
 export function createMcpTransport(server: McpServerConfig): Transport {
@@ -48,21 +90,60 @@ export function createMcpTransport(server: McpServerConfig): Transport {
   })
 }
 
+export async function createMcpToolClient(
+  server: McpServerConfig,
+  options: CreateMcpToolClientOptions = {}
+): Promise<McpToolClient> {
+  const transport = createMcpTransport(server)
+  const client = new Client(
+    { name: `wecom-platform-${server.name}`, version: '1.0.0' },
+    { capabilities: {} }
+  )
+  const connectTimeoutMs = options.connectTimeoutMs ?? configuredTimeout('MCP_CONNECT_TIMEOUT_MS', DEFAULT_CONNECT_TIMEOUT_MS)
+  const loadToolsTimeoutMs = options.loadToolsTimeoutMs ?? configuredTimeout('MCP_LOAD_TOOLS_TIMEOUT_MS', DEFAULT_LOAD_TOOLS_TIMEOUT_MS)
+  const toolTimeoutMs = options.toolTimeoutMs ?? configuredTimeout('MCP_TOOL_TIMEOUT_MS', DEFAULT_TOOL_TIMEOUT_MS)
+
+  let closed = false
+  const close = async () => {
+    if (closed) return
+    closed = true
+    await client.close().catch(() => {})
+    try {
+      await (transport as any).close?.()
+    } catch {
+      // Transport close is best-effort; client.close() is the primary cleanup path.
+    }
+  }
+
+  try {
+    await withTimeout(client.connect(transport), connectTimeoutMs, `MCP connect ${server.name}`, close)
+    const tools = await withTimeout(
+      loadMcpTools(server.name, client, { defaultToolTimeout: toolTimeoutMs }),
+      loadToolsTimeoutMs,
+      `MCP load tools ${server.name}`,
+      close
+    )
+    console.log(`[MCP] Loaded ${tools.length} tools from ${server.name}`)
+    return {
+      serverId: server.id,
+      serverName: server.name,
+      tools,
+      close,
+    }
+  } catch (err) {
+    await close()
+    throw err
+  }
+}
+
 export async function createMcpTools(mcpServers: McpServerConfig[]) {
   const allTools: Awaited<ReturnType<typeof loadMcpTools>> = []
 
   for (const server of mcpServers) {
     if (!server.enabled) continue
     try {
-      const transport = createMcpTransport(server)
-      const client = new Client(
-        { name: `wecom-platform-${server.name}`, version: '1.0.0' },
-        { capabilities: {} }
-      )
-      await client.connect(transport)
-      const tools = await loadMcpTools(server.name, client, { defaultToolTimeout: 60_000 })
-      console.log(`[MCP] Loaded ${tools.length} tools from ${server.name}`)
-      allTools.push(...tools)
+      const toolClient = await createMcpToolClient(server)
+      allTools.push(...toolClient.tools)
     } catch (err) {
       // Single MCP failure does not block bot startup
       console.error(`[MCP] Failed to load tools from ${server.name}:`, err)

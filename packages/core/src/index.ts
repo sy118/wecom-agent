@@ -1,4 +1,5 @@
-export { createMcpTools } from './mcp-client.js'
+export { createMcpToolClient, createMcpTools } from './mcp-client.js'
+export type { CreateMcpToolClientOptions, McpToolClient } from './mcp-client.js'
 export { AgentEngine, RecursionLimitError } from './agent-engine.js'
 export type { AgentEngineConfig } from './agent-engine.js'
 export { DifyClient } from './dify-client.js'

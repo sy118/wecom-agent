@@ -361,14 +361,30 @@ test('BotInstance updates and removes individual runtime bindings', () => {
 test('BotInstance reloads MCP server pools and drops removed servers', async () => {
   const instance = makeInstance()
   try {
+    let closeCalls = 0
     ;(instance as any).toolPool.set('old-mcp', [{ name: 'old_tool' }])
+    ;(instance as any).toolClients.set('old-mcp', { close: async () => { closeCalls++ } })
 
     await instance.reloadMcpServers([makeMcpServer({ id: 'disabled-mcp', enabled: false })])
 
     assert.equal((instance as any).toolPool.size, 0)
+    assert.equal((instance as any).toolClients.size, 0)
+    assert.equal(closeCalls, 1)
   } finally {
     ;(instance as any).sessions.destroy()
   }
+})
+
+test('BotInstance stop closes MCP tool clients', async () => {
+  const instance = makeInstance()
+  let closeCalls = 0
+  ;(instance as any).adapter = { stop: async () => {} }
+  ;(instance as any).toolClients.set('mcp-1', { close: async () => { closeCalls++ } })
+
+  await instance.stop()
+
+  assert.equal((instance as any).toolClients.size, 0)
+  assert.equal(closeCalls, 1)
 })
 
 test('BotInstance records normal replies on the current response run', async () => {
