@@ -170,19 +170,20 @@ export default function ContextsPage() {
     load()
   }
 
-  const renderParamInput = (server: McpServer, cfg: McpConfig, item: ParamSchemaItem) => {
+  const renderParamInput = (server: McpServer, cfg: McpConfig, item: ParamSchemaItem, index = 0) => {
     const value = cfg.params[item.key]
+    const fieldKey = `${server.id}:${item.key}:${index}`
     const commonProps = { style: { marginBottom: 8 }, extra: item.description }
     if (item.type === 'string[]') {
-      return <Form.Item key={item.key} label={item.label} {...commonProps}><Select mode="tags" value={value ?? []} onChange={(v) => setMcpParam(server.id, item.key, v)} /></Form.Item>
+      return <Form.Item key={fieldKey} label={item.label} {...commonProps}><Select mode="tags" value={value ?? []} onChange={(v) => setMcpParam(server.id, item.key, v)} /></Form.Item>
     }
     if (item.type === 'number') {
-      return <Form.Item key={item.key} label={item.label} {...commonProps}><InputNumber value={value} onChange={(v) => setMcpParam(server.id, item.key, v)} /></Form.Item>
+      return <Form.Item key={fieldKey} label={item.label} {...commonProps}><InputNumber value={value} onChange={(v) => setMcpParam(server.id, item.key, v)} /></Form.Item>
     }
     if (item.type === 'boolean') {
-      return <Form.Item key={item.key} label={item.label} {...commonProps}><Switch checked={Boolean(value)} onChange={(v) => setMcpParam(server.id, item.key, v)} /></Form.Item>
+      return <Form.Item key={fieldKey} label={item.label} {...commonProps}><Switch checked={Boolean(value)} onChange={(v) => setMcpParam(server.id, item.key, v)} /></Form.Item>
     }
-    return <Form.Item key={item.key} label={item.label} {...commonProps}><Input value={value ?? ''} onChange={(event) => setMcpParam(server.id, item.key, event.target.value)} /></Form.Item>
+    return <Form.Item key={fieldKey} label={item.label} {...commonProps}><Input value={value ?? ''} onChange={(event) => setMcpParam(server.id, item.key, event.target.value)} /></Form.Item>
   }
 
   const renderWikiConfig = (server: McpServer, cfg: McpConfig) => {
@@ -240,7 +241,7 @@ export default function ContextsPage() {
         {advancedParams.length > 0 && (
           <>
             <Divider orientation="left" style={{ fontSize: 12 }}>高级参数</Divider>
-            {advancedParams.map((item) => renderParamInput(server, cfg, item))}
+            {advancedParams.map((item, index) => renderParamInput(server, cfg, item, index))}
           </>
         )}
       </>
@@ -346,7 +347,7 @@ export default function ContextsPage() {
                         <Form.Item label="强制调用" style={{ marginBottom: 8 }} extra="每条消息处理前先调用该 MCP 工具并注入检索结果">
                           <Switch checked={Boolean(cfg.forceCall)} onChange={(value) => updateMcpConfig(server.id, (current) => ({ ...current, forceCall: value }))} />
                         </Form.Item>
-                        {(server.paramSchema ?? []).map((item) => renderParamInput(server, cfg, item))}
+                        {(server.paramSchema ?? []).map((item, index) => renderParamInput(server, cfg, item, index))}
                       </>
                     )
                   )}

@@ -225,20 +225,36 @@ export class BotInstance {
 
   async reloadMcpServers(mcpServers: McpServerConfig[]): Promise<void> {
     this.deps.mcpServers = mcpServers
-    await this.closeMcpToolClients()
-    this.toolPool.clear()
-    if (this.deps.bot.provider === 'dify') return
+    if (this.deps.bot.provider === 'dify') {
+      await this.closeMcpToolClients()
+      this.toolPool.clear()
+      return
+    }
 
+    const nextToolPool = new Map<string, StructuredTool[]>()
+    const nextToolClients = new Map<string, McpToolClient>()
     for (const server of mcpServers) {
       if (!server.enabled) continue
       try {
         const toolClient = await createMcpToolClient(server)
-        this.toolPool.set(server.id, toolClient.tools)
-        this.toolClients.set(server.id, toolClient)
+        nextToolPool.set(server.id, toolClient.tools)
+        nextToolClients.set(server.id, toolClient)
       } catch (err) {
         console.error(`[BotInstance:${this.deps.bot.id}] Failed to reload tools from ${server.name}:`, err)
+        const previousTools = this.toolPool.get(server.id)
+        const previousClient = this.toolClients.get(server.id)
+        if (previousTools?.length && previousClient) {
+          nextToolPool.set(server.id, previousTools)
+          nextToolClients.set(server.id, previousClient)
+          console.warn(`[BotInstance:${this.deps.bot.id}] Keeping last known MCP tools for ${server.name}`)
+        }
       }
     }
+
+    const oldClients = [...this.toolClients].filter(([serverId, client]) => nextToolClients.get(serverId) !== client).map(([, client]) => client)
+    this.toolPool = nextToolPool
+    this.toolClients = nextToolClients
+    await this.closeMcpToolClients(oldClients)
     console.log(`[BotInstance:${this.deps.bot.id}] Reloaded ${this.toolPool.size} MCP server tool pool(s)`)
   }
 
@@ -534,10 +550,10 @@ export class BotInstance {
     }
   }
 
-  private async closeMcpToolClients(): Promise<void> {
-    const clients = [...this.toolClients.values()]
-    this.toolClients.clear()
-    await Promise.allSettled(clients.map((client) => client.close()))
+  private async closeMcpToolClients(clients?: McpToolClient[]): Promise<void> {
+    const clientsToClose = clients ?? [...this.toolClients.values()]
+    if (!clients) this.toolClients.clear()
+    await Promise.allSettled(clientsToClose.map((client) => client.close()))
   }
 
   private async executeForceCallMcps(

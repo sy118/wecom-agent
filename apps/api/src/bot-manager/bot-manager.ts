@@ -10,6 +10,8 @@ import type { BotStatus, BotStatusEvent, ContextConfig } from '@wecom-platform/t
 
 export class BotManager extends EventEmitter {
   private instances = new Map<string, BotInstance>()
+  private mcpRefreshInFlight: Promise<void> | null = null
+  private mcpRefreshPending = false
 
   async start(botId: string): Promise<void> {
     if (this.instances.has(botId)) {
@@ -113,6 +115,28 @@ export class BotManager extends EventEmitter {
   }
 
   async refreshMcpServers(botId?: string): Promise<void> {
+    if (this.mcpRefreshInFlight) {
+      this.mcpRefreshPending = true
+      return this.mcpRefreshInFlight
+    }
+
+    this.mcpRefreshInFlight = (async () => {
+      try {
+        await this.runMcpServersRefresh(botId)
+        while (this.mcpRefreshPending) {
+          this.mcpRefreshPending = false
+          await this.runMcpServersRefresh()
+        }
+      } finally {
+        this.mcpRefreshInFlight = null
+        this.mcpRefreshPending = false
+      }
+    })()
+
+    return this.mcpRefreshInFlight
+  }
+
+  private async runMcpServersRefresh(botId?: string): Promise<void> {
     const mcpServers = await McpServerRepository.findAll()
     const targets = botId
       ? [...this.instances].filter(([id]) => id === botId)
