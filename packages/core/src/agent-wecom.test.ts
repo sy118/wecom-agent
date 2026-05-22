@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AIMessage, HumanMessage } from '@langchain/core/messages'
 import { WecomAdapter } from './wecom-adapter.js'
-import { __testExtractLastNonEmptyAiText, __testWithCollectedFallback } from './agent-engine.js'
+import { __testExtractLastNonEmptyAiText, __testWithCollectedFallback, __testWrapToolsForAgent } from './agent-engine.js'
 
 test('AgentEngine extracts the last non-empty AI text', () => {
   const result = __testExtractLastNonEmptyAiText([
@@ -22,6 +22,39 @@ test('AgentEngine recursion fallback prefers collected intermediate messages', (
 
   assert.equal(result.messages?.length, 1)
   assert.equal(result.messages?.[0]?.content, 'partial answer from tool flow')
+})
+
+test('AgentEngine converts tool errors into model-readable output', async () => {
+  const [tool] = __testWrapToolsForAgent([
+    {
+      name: 'execute_sql',
+      invoke: async () => {
+        throw new Error('MCP error -32001: TimeoutError')
+      },
+    } as any,
+  ], 100)
+
+  const output = await (tool as any).invoke({ sql: 'SHOW COLUMNS FROM cm_order_entry_tasklock' })
+
+  assert.match(String(output), /\[工具调用失败: execute_sql\]/)
+  assert.match(String(output), /请不要重复调用/)
+})
+
+test('AgentEngine times out slow tool calls before the whole agent invoke timeout', async () => {
+  const [tool] = __testWrapToolsForAgent([
+    {
+      name: 'slow_tool',
+      invoke: async (_input: unknown, config?: { signal?: AbortSignal }) => new Promise((_resolve, reject) => {
+        config?.signal?.addEventListener('abort', () => reject(new Error('aborted by test')), { once: true })
+      }),
+    } as any,
+  ], 10)
+
+  const startedAt = Date.now()
+  const output = await (tool as any).invoke({})
+
+  assert.ok(Date.now() - startedAt < 500)
+  assert.match(String(output), /\[工具调用失败: slow_tool\]/)
 })
 
 test('WecomAdapter parses text quote with current text message', async () => {
