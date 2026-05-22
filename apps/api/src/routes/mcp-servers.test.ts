@@ -104,6 +104,22 @@ test('MCP server API validates and normalizes transport-specific payloads', asyn
   })
   assert.equal(invalidHeaders.response.status, 400)
 
+  const duplicatedParamKey = await requestJson('/api/mcp-servers', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: 'bad-param-schema',
+      transportType: 'sse',
+      enabled: true,
+      url: 'http://127.0.0.1:4000/sse',
+      paramSchema: [
+        { key: 'project', label: '项目', type: 'string' },
+        { key: 'project', label: '项目副本', type: 'string' },
+      ],
+    }),
+  })
+  assert.equal(duplicatedParamKey.response.status, 400)
+  assert.match(duplicatedParamKey.body.error, /duplicated/)
+
   const created = await requestJson('/api/mcp-servers', {
     method: 'POST',
     body: JSON.stringify({
@@ -115,6 +131,9 @@ test('MCP server API validates and normalizes transport-specific payloads', asyn
       args: ['ignored'],
       env: { IGNORED: 'ignored' },
       headers: { Authorization: 'Bearer ${YUQUE_MCP_TOKEN}' },
+      paramSchema: [
+        { key: 'namespace', label: '知识库', type: 'string', description: '默认知识库' },
+      ],
     }),
   })
 
@@ -123,4 +142,7 @@ test('MCP server API validates and normalizes transport-specific payloads', asyn
   assert.deepEqual(created.body.args, [])
   assert.deepEqual(created.body.env, {})
   assert.deepEqual(created.body.headers, { Authorization: 'Bearer ${YUQUE_MCP_TOKEN}' })
+  assert.deepEqual(created.body.paramSchema, [
+    { key: 'namespace', label: '知识库', type: 'string', description: '默认知识库' },
+  ])
 })

@@ -92,7 +92,8 @@ export default function McpServersPage() {
       }
       setModalOpen(false); form.resetFields(); setEditServer(null); load()
     } catch (error) {
-      message.error(error instanceof Error ? error.message : '保存失败')
+      const apiMessage = (error as any)?.response?.data?.error
+      message.error(apiMessage ?? (error instanceof Error ? error.message : '保存失败'))
     }
   }
 
@@ -203,15 +204,15 @@ export default function McpServersPage() {
           <Form.List name="paramSchema">
             {(fields, { add, remove }) => (
               <Space direction="vertical" style={{ width: '100%' }}>
-                {fields.map((field) => (
-                  <Space key={field.key} align="baseline" wrap>
-                    <Form.Item {...field} name={[field.name, 'key']} rules={[{ required: true }]}>
+                {fields.map(({ key, name, ...restField }) => (
+                  <Space key={key} align="baseline" wrap>
+                    <Form.Item {...restField} name={[name, 'key']} rules={[{ required: true }]}>
                       <Input placeholder="key" />
                     </Form.Item>
-                    <Form.Item {...field} name={[field.name, 'label']} rules={[{ required: true }]}>
+                    <Form.Item {...restField} name={[name, 'label']} rules={[{ required: true }]}>
                       <Input placeholder="显示名称" />
                     </Form.Item>
-                    <Form.Item {...field} name={[field.name, 'type']} initialValue="string" rules={[{ required: true }]}>
+                    <Form.Item {...restField} name={[name, 'type']} initialValue="string" rules={[{ required: true }]}>
                       <Select style={{ width: 120 }} options={[
                         { label: 'string', value: 'string' },
                         { label: 'string[]', value: 'string[]' },
@@ -219,10 +220,10 @@ export default function McpServersPage() {
                         { label: 'boolean', value: 'boolean' },
                       ]} />
                     </Form.Item>
-                    <Form.Item {...field} name={[field.name, 'description']}>
+                    <Form.Item {...restField} name={[name, 'description']}>
                       <Input placeholder="说明" />
                     </Form.Item>
-                    <Button onClick={() => remove(field.name)}>删除</Button>
+                    <Button onClick={() => remove(name)}>删除</Button>
                   </Space>
                 ))}
                 <Button type="dashed" onClick={() => add({ type: 'string' })}>添加参数</Button>

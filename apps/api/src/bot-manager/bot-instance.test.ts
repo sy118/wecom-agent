@@ -375,6 +375,37 @@ test('BotInstance reloads MCP server pools and drops removed servers', async () 
   }
 })
 
+test('BotInstance keeps previous MCP tools when reload of an enabled server fails', async () => {
+  const instance = makeInstance()
+  const previousTools = [{ name: 'jira_search' }]
+  let closeCalls = 0
+  delete process.env.JIRA_PERSONAL_TOKEN
+  try {
+    ;(instance as any).toolPool.set('jira', previousTools)
+    ;(instance as any).toolClients.set('jira', { close: async () => { closeCalls++ } })
+
+    await instance.reloadMcpServers([
+      makeMcpServer({
+        id: 'jira',
+        name: 'jira',
+        enabled: true,
+        url: null,
+        transportType: 'stdio',
+        command: 'uvx',
+        args: ['mcp-atlassian'],
+        env: { JIRA_PERSONAL_TOKEN: '${JIRA_PERSONAL_TOKEN}' },
+        headers: {},
+      }),
+    ])
+
+    assert.equal((instance as any).toolPool.get('jira'), previousTools)
+    assert.equal((instance as any).toolClients.size, 1)
+    assert.equal(closeCalls, 0)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
 test('BotInstance stop closes MCP tool clients', async () => {
   const instance = makeInstance()
   let closeCalls = 0

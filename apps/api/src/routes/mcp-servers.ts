@@ -8,6 +8,13 @@ export const mcpServersRouter: Router = Router({ mergeParams: true })
 type McpServerPayload = Omit<McpServerConfig, 'id'> | Partial<Omit<McpServerConfig, 'id' | 'botId'>>
 
 const transportTypes = new Set<McpServerTransportType>(['sse', 'stdio', 'streamable-http'])
+const paramTypes = new Set(['string', 'string[]', 'number', 'boolean'])
+
+function refreshMcpServersInBackground(reason: string): void {
+  void botManager.refreshMcpServers().catch((error) => {
+    console.error(`[MCP] Failed to refresh MCP servers after ${reason}:`, error)
+  })
+}
 
 function isStringRecord(value: unknown): value is Record<string, string> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -28,6 +35,33 @@ function assertStringRecord(value: unknown, field: string): Record<string, strin
   return value
 }
 
+function assertParamSchema(value: unknown): McpServerConfig['paramSchema'] {
+  if (value === undefined) return []
+  if (!Array.isArray(value)) throw new Error('paramSchema must be an array')
+
+  const seenKeys = new Set<string>()
+  return value.map((item, index) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) {
+      throw new Error(`paramSchema[${index}] must be an object`)
+    }
+    const record = item as Record<string, unknown>
+    const key = typeof record.key === 'string' ? record.key.trim() : ''
+    const label = typeof record.label === 'string' ? record.label.trim() : ''
+    const type = record.type
+    if (!key) throw new Error(`paramSchema[${index}].key is required`)
+    if (seenKeys.has(key)) throw new Error(`paramSchema key "${key}" is duplicated`)
+    if (!label) throw new Error(`paramSchema[${index}].label is required`)
+    if (typeof type !== 'string' || !paramTypes.has(type)) throw new Error(`paramSchema[${index}].type is invalid`)
+    seenKeys.add(key)
+    return {
+      key,
+      label,
+      type: type as NonNullable<McpServerConfig['paramSchema']>[number]['type'],
+      ...(typeof record.description === 'string' && record.description.trim() ? { description: record.description.trim() } : {}),
+    }
+  })
+}
+
 function assertUrl(value: unknown, field: string): string {
   if (typeof value !== 'string' || value.trim() === '') throw new Error(`${field} is required`)
   try {
@@ -46,6 +80,7 @@ function normalizeMcpServerPayload(payload: McpServerPayload): McpServerPayload 
     args: assertStringArray(payload.args, 'args'),
     env: assertStringRecord(payload.env, 'env'),
     headers: assertStringRecord(payload.headers, 'headers'),
+    paramSchema: assertParamSchema(payload.paramSchema),
   }
 
   if (transportType === 'sse') {
@@ -86,7 +121,7 @@ mcpServersRouter.post('/', async (req, res) => {
   try {
     const data = normalizeMcpServerPayload({ ...req.body, botId: null }) as Omit<McpServerConfig, 'id'>
     const server = await McpServerRepository.create(data)
-    await botManager.refreshMcpServers()
+    refreshMcpServersInBackground(`create ${server.name}`)
     res.status(201).json(server)
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid MCP server payload' })
@@ -98,7 +133,7 @@ mcpServersRouter.put('/:id', async (req, res) => {
     const data = normalizeMcpServerPayload(req.body) as Partial<Omit<McpServerConfig, 'id' | 'botId'>>
     const server = await McpServerRepository.update(req.params.id, data)
     if (!server) { res.status(404).json({ error: 'MCP server not found' }); return }
-    await botManager.refreshMcpServers()
+    refreshMcpServersInBackground(`update ${server.name}`)
     res.json(server)
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : 'Invalid MCP server payload' })
@@ -107,6 +142,6 @@ mcpServersRouter.put('/:id', async (req, res) => {
 
 mcpServersRouter.delete('/:id', async (req, res) => {
   await McpServerRepository.delete(req.params.id)
-  await botManager.refreshMcpServers()
+  refreshMcpServersInBackground(`delete ${req.params.id}`)
   res.status(204).send()
 })
