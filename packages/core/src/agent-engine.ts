@@ -23,8 +23,10 @@ export interface AgentEngineConfig {
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000
+const DEFAULT_TOOL_TIMEOUT_MS = 120_000
 const DEFAULT_RECURSION_LIMIT = 50
 const EMPTY_RESPONSE_FALLBACK = '抱歉，我暂时无法生成有效回复，请稍后重试。'
+const MAX_TOOL_ERROR_MESSAGE_LENGTH = 800
 
 async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
   const controller = new AbortController()
@@ -42,6 +44,87 @@ async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, ms: numb
   } finally {
     if (timeout) clearTimeout(timeout)
   }
+}
+
+async function withToolTimeout<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  ms: number,
+  label: string,
+  parentSignal?: AbortSignal
+): Promise<T> {
+  const controller = new AbortController()
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const abortFromParent = () => controller.abort()
+  if (parentSignal?.aborted) controller.abort()
+  else parentSignal?.addEventListener('abort', abortFromParent, { once: true })
+
+  try {
+    return await Promise.race([
+      run(controller.signal),
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => {
+          controller.abort()
+          reject(new Error(`${label} timed out after ${ms}ms`))
+        }, ms)
+      }),
+    ])
+  } finally {
+    if (timeout) clearTimeout(timeout)
+    parentSignal?.removeEventListener('abort', abortFromParent)
+  }
+}
+
+function configuredPositiveInt(envKey: string, fallback: number): number {
+  const raw = process.env[envKey]
+  if (!raw) return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function sanitizeErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  return message.replace(/\s+/g, ' ').trim().slice(0, MAX_TOOL_ERROR_MESSAGE_LENGTH)
+}
+
+function toolFailureOutput(toolName: string, err: unknown, failureCount: number): string {
+  const message = sanitizeErrorMessage(err) || 'unknown error'
+  const retryHint = failureCount > 1
+    ? `同一个工具已经失败 ${failureCount} 次，请不要继续重复调用。`
+    : '请不要重复调用同一个失败工具。'
+  return [
+    `[工具调用失败: ${toolName}] ${message}`,
+    `${retryHint}请直接向用户说明当前工具不可用、查询超时或建议缩小查询范围。`,
+  ].join('\n')
+}
+
+function wrapToolsForAgent(tools: StructuredTool[], timeoutMs: number): StructuredTool[] {
+  const failureCounts = new Map<string, number>()
+
+  return tools.map((tool) => {
+    const safeInvoke = async (input: unknown, config?: Record<string, unknown>) => {
+      try {
+        return await withToolTimeout(
+          (signal) => (tool.invoke as any).call(tool, input, { ...(config ?? {}), signal }),
+          timeoutMs,
+          `Tool ${tool.name}`,
+          config?.signal as AbortSignal | undefined
+        )
+      } catch (err) {
+        const failureCount = (failureCounts.get(tool.name) ?? 0) + 1
+        failureCounts.set(tool.name, failureCount)
+        const output = toolFailureOutput(tool.name, err, failureCount)
+        console.warn(`[AgentEngine] ${output}`)
+        return output
+      }
+    }
+
+    return new Proxy(tool as any, {
+      get(target, prop, receiver) {
+        if (prop === 'invoke' || prop === 'call') return safeInvoke
+        return Reflect.get(target, prop, receiver)
+      },
+    }) as StructuredTool
+  })
 }
 
 export interface StreamCallbacks {
@@ -142,6 +225,10 @@ export function __testWithCollectedFallback(history: BaseMessage[], collectedMes
   return withCollectedFallback(history, collectedMessages)
 }
 
+export function __testWrapToolsForAgent(tools: StructuredTool[], timeoutMs: number): StructuredTool[] {
+  return wrapToolsForAgent(tools, timeoutMs)
+}
+
 export class AgentEngine {
   private model: InstanceType<typeof ChatOpenAI> | InstanceType<typeof ChatAnthropic> | null = null
   private config: AgentEngineConfig
@@ -189,7 +276,12 @@ export class AgentEngine {
 
   private createAgentWithTools(tools: StructuredTool[], systemPrompt: string) {
     if (!this.model) throw new Error('AgentEngine not initialized')
-    return createAgent({ model: this.model, tools, systemPrompt })
+    const toolTimeoutMs = configuredPositiveInt('AGENT_TOOL_TIMEOUT_MS', DEFAULT_TOOL_TIMEOUT_MS)
+    const safeTools = wrapToolsForAgent(tools, toolTimeoutMs)
+    const toolFailurePolicy = tools.length > 0
+      ? '\n\n## 工具调用失败处理\n当工具返回“[工具调用失败: ...]”时，停止重复调用同一个工具，直接向用户说明失败原因，并给出可执行的下一步建议。'
+      : ''
+    return createAgent({ model: this.model, tools: safeTools, systemPrompt: `${systemPrompt}${toolFailurePolicy}` })
   }
 
   async invokeWithTools(
