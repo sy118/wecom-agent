@@ -488,7 +488,8 @@ test('BotInstance progressive mode sends privacy-safe heartbeat and final reply'
 
     const texts = adapter.streams.map((item) => item.text).join('\n')
     assert.match(texts, /正在思考中|正在检索相关信息/)
-    assert.match(texts, /已用/)
+    assert.match(texts, /已用时间：\d+ 秒/)
+    assert.doesNotMatch(texts, /▰|▱/)
     assert.match(texts, /progress answer/)
     assert.doesNotMatch(texts, /repo query|filePath|token|headers|env/)
   } finally {
