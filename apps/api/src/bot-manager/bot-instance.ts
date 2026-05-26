@@ -40,16 +40,16 @@ function contentText(content: string | IncomingContent[]): string {
 
 function formatElapsed(startedAt: number): string {
   const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
-  if (seconds < 60) return `${seconds}s`
+  if (seconds < 60) return `${seconds} 秒`
   const minutes = Math.floor(seconds / 60)
   const rest = seconds % 60
-  return `${minutes}m${rest.toString().padStart(2, '0')}s`
+  return `${minutes} 分 ${rest.toString().padStart(2, '0')} 秒`
 }
 
 function progressBar(tick: number): string {
   const width = 6
-  const filled = tick % (width + 1)
-  return `[${'▰'.repeat(filled)}${'▱'.repeat(width - filled)}]`
+  const active = tick % width
+  return `[${Array.from({ length: width }, (_, index) => (index === active ? '●' : '○')).join('')}]`
 }
 
 function progressMessage(phase: ProgressPhase, startedAt: number, tick: number): string {
@@ -58,7 +58,7 @@ function progressMessage(phase: ProgressPhase, startedAt: number, tick: number):
     : phase === 'organizing'
       ? '🧩 正在整理线索...'
       : '⏳ 正在思考中...'
-  return `${title}\n${progressBar(tick)} 已用 ${formatElapsed(startedAt)}`
+  return `${title}\n${progressBar(tick)}，已用时间：${formatElapsed(startedAt)}`
 }
 
 export function isVisionFallbackError(err: unknown): boolean {
