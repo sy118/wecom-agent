@@ -4,7 +4,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { McpServerConfig } from '@wecom-platform/types'
-import { createMcpTools, createMcpTransport } from './mcp-client.js'
+import { __testConfiguredTimeout, createMcpTools, createMcpTransport } from './mcp-client.js'
 
 function makeServer(overrides: Partial<McpServerConfig>): McpServerConfig {
   return {
@@ -20,6 +20,18 @@ function makeServer(overrides: Partial<McpServerConfig>): McpServerConfig {
     ...overrides,
   }
 }
+
+test('MCP client reads MCP_TOOL_TIMEOUT_MS as default tool timeout override', () => {
+  const previous = process.env.MCP_TOOL_TIMEOUT_MS
+  process.env.MCP_TOOL_TIMEOUT_MS = '180000'
+
+  try {
+    assert.equal(__testConfiguredTimeout('MCP_TOOL_TIMEOUT_MS', 60_000), 180_000)
+  } finally {
+    if (previous === undefined) delete process.env.MCP_TOOL_TIMEOUT_MS
+    else process.env.MCP_TOOL_TIMEOUT_MS = previous
+  }
+})
 
 test('createMcpTransport creates SSE transport for SSE servers', () => {
   const transport = createMcpTransport(makeServer({ transportType: 'sse', url: 'http://127.0.0.1:65535/sse' }))

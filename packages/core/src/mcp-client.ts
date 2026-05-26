@@ -9,7 +9,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 const variablePattern = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
 const DEFAULT_LOAD_TOOLS_TIMEOUT_MS = 20_000
-const DEFAULT_TOOL_TIMEOUT_MS = 60_000
+const DEFAULT_TOOL_TIMEOUT_MS = 180_000
 
 export interface McpToolClient {
   serverId: string
@@ -88,6 +88,10 @@ export function createMcpTransport(server: McpServerConfig): Transport {
   return new StreamableHTTPClientTransport(new URL(server.url), {
     requestInit: { headers: resolveStringRecord(server.headers) },
   })
+}
+
+export function __testConfiguredTimeout(envKey: string, fallback: number): number {
+  return configuredTimeout(envKey, fallback)
 }
 
 export async function createMcpToolClient(

@@ -2,7 +2,29 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { AIMessage, HumanMessage } from '@langchain/core/messages'
 import { WecomAdapter } from './wecom-adapter.js'
-import { __testExtractLastNonEmptyAiText, __testWithCollectedFallback, __testWrapToolsForAgent } from './agent-engine.js'
+import { __testConfiguredPositiveInt, __testCreateTimeoutResponse, __testExtractLastNonEmptyAiText, __testWithCollectedFallback, __testWrapToolsForAgent } from './agent-engine.js'
+
+test('AgentEngine reads positive integer timeout environment values', () => {
+  const previous = process.env.AGENT_TIMEOUT_MS
+  process.env.AGENT_TIMEOUT_MS = '900000'
+
+  try {
+    assert.equal(__testConfiguredPositiveInt('AGENT_TIMEOUT_MS', 600_000), 900_000)
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_TIMEOUT_MS
+    else process.env.AGENT_TIMEOUT_MS = previous
+  }
+})
+
+test('AgentEngine timeout response prefers partial AI text', () => {
+  const response = __testCreateTimeoutResponse([
+    new HumanMessage('question'),
+    new AIMessage('阶段性结果'),
+  ])
+
+  assert.match(response, /阶段性结果/)
+  assert.match(response, /缩小查询范围/)
+})
 
 test('AgentEngine extracts the last non-empty AI text', () => {
   const result = __testExtractLastNonEmptyAiText([
