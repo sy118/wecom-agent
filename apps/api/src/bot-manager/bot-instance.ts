@@ -18,6 +18,16 @@ const THINKING_MESSAGE = '🤔 正在分析，请稍候...'
 const STREAM_TOOL_MSG = '🔍 正在检索相关信息...'
 const TYPEWRITER_INTERVAL_MS = 800
 const EMPTY_RESPONSE_FALLBACK = '抱歉，我暂时无法生成有效回复，请稍后重试。'
+const PROGRESS_HEARTBEAT_INTERVAL_MS = 5_000
+
+type ProgressPhase = 'thinking' | 'tool' | 'organizing'
+
+function configuredPositiveInt(envKey: string): number | undefined {
+  const raw = process.env[envKey]
+  if (!raw) return undefined
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined
+}
 
 function safeReply(text: string): string {
   return text.trim() || EMPTY_RESPONSE_FALLBACK
@@ -26,6 +36,29 @@ function safeReply(text: string): string {
 function contentText(content: string | IncomingContent[]): string {
   if (typeof content === 'string') return content
   return content.map((item) => (item.type === 'text' ? item.text : `[图片: ${item.url}]`)).join('\n')
+}
+
+function formatElapsed(startedAt: number): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return `${minutes}m${rest.toString().padStart(2, '0')}s`
+}
+
+function progressBar(tick: number): string {
+  const width = 6
+  const filled = tick % (width + 1)
+  return `[${'▰'.repeat(filled)}${'▱'.repeat(width - filled)}]`
+}
+
+function progressMessage(phase: ProgressPhase, startedAt: number, tick: number): string {
+  const title = phase === 'tool'
+    ? STREAM_TOOL_MSG
+    : phase === 'organizing'
+      ? '🧩 正在整理线索...'
+      : '⏳ 正在思考中...'
+  return `${title}\n${progressBar(tick)} 已用 ${formatElapsed(startedAt)}`
 }
 
 export function isVisionFallbackError(err: unknown): boolean {
@@ -131,8 +164,8 @@ export class BotInstance {
           provider: bot.provider,
         },
         systemPrompt: '',
-        timeoutMs: process.env.AGENT_TIMEOUT_MS ? Number(process.env.AGENT_TIMEOUT_MS) : undefined,
-        recursionLimit: process.env.AGENT_RECURSION_LIMIT ? Number(process.env.AGENT_RECURSION_LIMIT) : undefined,
+        timeoutMs: configuredPositiveInt('AGENT_TIMEOUT_MS'),
+        recursionLimit: configuredPositiveInt('AGENT_RECURSION_LIMIT'),
       })
       await this.engine.initialize()
 
@@ -463,6 +496,71 @@ export class BotInstance {
     )
   }
 
+  private createProgressReporter(chatId: string, frame: any | undefined, responseRun: BotResponseRun) {
+    let streamId: string | undefined
+    let phase: ProgressPhase = 'thinking'
+    let interval: ReturnType<typeof setInterval> | undefined
+    let tick = 0
+    let active = false
+    let editAvailable = true
+    const startedAt = Date.now()
+
+    const stop = () => {
+      active = false
+      if (interval) clearInterval(interval)
+      interval = undefined
+    }
+
+    const render = async () => {
+      if (!active || !streamId || !editAvailable) return
+      try {
+        await this.adapter.editMessage(chatId, streamId, progressMessage(phase, startedAt, tick), false)
+        tick += 1
+      } catch (err) {
+        editAvailable = false
+        stop()
+        console.warn(`[BotInstance:${this.deps.bot.id}] Progress heartbeat stopped after edit failure:`, err)
+      }
+    }
+
+    return {
+      get streamId() {
+        return streamId
+      },
+      start: async () => {
+        if (!frame) {
+          await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
+          return
+        }
+        try {
+          streamId = await this.adapter.sendThinkingWithStream(frame, progressMessage(phase, startedAt, tick), responseRun.feedbackId)
+          tick += 1
+        } catch (err) {
+          editAvailable = false
+          console.warn(`[BotInstance:${this.deps.bot.id}] Progress stream unavailable:`, err)
+          await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
+          return
+        }
+        active = true
+        interval = setInterval(() => { void render() }, PROGRESS_HEARTBEAT_INTERVAL_MS)
+      },
+      setPhase: (nextPhase: ProgressPhase) => {
+        if (!active || !editAvailable) return
+        phase = nextPhase
+        void render()
+      },
+      finish: async (text: string) => {
+        stop()
+        await this.finishTrackedReply(chatId, text, responseRun, streamId)
+      },
+      fail: async (text: string) => {
+        stop()
+        await this.sendRunErrorReply(chatId, text, responseRun, streamId)
+      },
+      stop,
+    }
+  }
+
   private async sendRunErrorReply(
     chatId: string,
     text: string,
@@ -761,30 +859,25 @@ export class BotInstance {
     frame: any | undefined,
     responseRun: BotResponseRun
   ): Promise<void> {
-    let streamId: string | undefined
-    if (frame) {
-      try {
-        streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
-      } catch {
-        streamId = undefined
-      }
-    }
-
-    if (!streamId) {
-      await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
-    }
+    const reporter = this.createProgressReporter(chatId, frame, responseRun)
+    await reporter.start()
 
     try {
-      const response = safeReply(await this.engine!.invokeWithTools(sessionMessages, content, systemPrompt, tools))
+      const response = safeReply(await this.engine!.invokeWithTools(sessionMessages, content, systemPrompt, tools, {
+        onToolStart: () => reporter.setPhase('tool'),
+        onToolEnd: () => reporter.setPhase('organizing'),
+        onOrganizing: () => reporter.setPhase('organizing'),
+      }))
       await this.saveMessages(chatKey, content, response, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, response)
-      await this.finishTrackedReply(chatId, response, responseRun, streamId)
+      await reporter.finish(response)
     } catch (err: any) {
+      reporter.stop()
       if (err instanceof RecursionLimitError) {
         const response = safeReply(err.summary)
         await this.saveMessages(chatKey, content, response, responseRun.id)
         await BotResponseRunRepository.markSent(responseRun.id, response)
-        await this.finishTrackedReply(chatId, response, responseRun, streamId)
+        await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
         return
       }
       if (Array.isArray(content) && isVisionFallbackError(err)) {
@@ -794,7 +887,7 @@ export class BotInstance {
           const response = await invokeVisionFallback(this.engine!, sessionMessages, content, systemPrompt, tools)
           await this.saveMessages(chatKey, degradeVisionContent(content), response, responseRun.id)
           await BotResponseRunRepository.markSent(responseRun.id, response)
-          await this.finishTrackedReply(chatId, response, responseRun, streamId)
+          await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
           return
         } catch {
           // fall through to generic error
@@ -802,7 +895,7 @@ export class BotInstance {
       }
 
       console.error(`[BotInstance:${this.deps.bot.id}] Agent error:`, err)
-      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun, streamId)
+      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun, reporter.streamId)
     }
   }
 
@@ -850,6 +943,8 @@ export class BotInstance {
         onToolStart: async () => {
           await this.adapter.editMessage(chatId, streamId!, STREAM_TOOL_MSG, false).catch(() => {})
         },
+        onToolEnd: async () => {},
+        onOrganizing: async () => {},
       }))
 
       await this.saveMessages(chatKey, content, finalResponse, responseRun.id)

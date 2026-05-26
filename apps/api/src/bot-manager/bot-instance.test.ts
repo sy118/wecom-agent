@@ -455,6 +455,82 @@ test('BotInstance records normal replies on the current response run', async () 
   }
 })
 
+test('BotInstance progressive mode sends privacy-safe heartbeat and final reply', async () => {
+  const bot = await makePersistedBot({ streamingMode: 'progressive' })
+  const context = makeContext({ id: 'progress-context', botId: bot.id })
+  const instance = makeInstanceForBot(bot, [context])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = adapter
+    ;(instance as any).engine = {
+      invokeWithTools: async (_messages: unknown, _content: unknown, _prompt: string, _tools: unknown, callbacks: any) => {
+        await callbacks.onToolStart()
+        await callbacks.onToolEnd()
+        return 'progress answer'
+      },
+    }
+    const chatKey = `wecom:user:progress-${Date.now()}`
+    await (instance as any).sessions.getOrCreate(chatKey, context.id, 30)
+    const run = await BotResponseRunRepository.create({
+      feedbackId: 'feedback-progress-reply',
+      botId: bot.id,
+      contextId: context.id,
+      sessionId: 'session-progress',
+      chatKey,
+      chatId: 'user-progress',
+      userId: 'user-progress',
+      questionPreview: 'repo query filePath token headers env',
+      provider: bot.provider,
+      model: bot.llmModel,
+    })
+
+    await (instance as any).handleProgressive('user-progress', chatKey, 'question', [], 'prompt', [], { body: {} }, run)
+
+    const texts = adapter.streams.map((item) => item.text).join('\n')
+    assert.match(texts, /正在思考中|正在检索相关信息/)
+    assert.match(texts, /已用/)
+    assert.match(texts, /progress answer/)
+    assert.doesNotMatch(texts, /repo query|filePath|token|headers|env/)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance progressive mode falls back when stream is unavailable', async () => {
+  const bot = await makePersistedBot({ streamingMode: 'progressive' })
+  const context = makeContext({ id: 'progress-fallback-context', botId: bot.id })
+  const instance = makeInstanceForBot(bot, [context])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = {
+      ...adapter,
+      sendThinkingWithStream: async () => { throw new Error('stream unavailable') },
+    }
+    ;(instance as any).engine = { invokeWithTools: async () => 'fallback answer' }
+    const chatKey = `wecom:user:progress-fallback-${Date.now()}`
+    await (instance as any).sessions.getOrCreate(chatKey, context.id, 30)
+    const run = await BotResponseRunRepository.create({
+      feedbackId: 'feedback-progress-fallback',
+      botId: bot.id,
+      contextId: context.id,
+      sessionId: 'session-progress-fallback',
+      chatKey,
+      chatId: 'user-progress-fallback',
+      userId: 'user-progress-fallback',
+      questionPreview: 'question',
+      provider: bot.provider,
+      model: bot.llmModel,
+    })
+
+    await (instance as any).handleProgressive('user-progress-fallback', chatKey, 'question', [], 'prompt', [], { body: {} }, run)
+
+    assert.equal(adapter.sent.some((item) => item.text.includes('正在分析')), true)
+    assert.equal(adapter.sent.some((item) => item.text === 'fallback answer'), true)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
 test('BotInstance records typewriter replies on one response run', async () => {
   const bot = await makePersistedBot({ streamingMode: 'typewriter' })
   const context = makeContext({ id: 'typewriter-context', botId: bot.id })

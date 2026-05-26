@@ -15,6 +15,13 @@ export class RecursionLimitError extends Error {
   }
 }
 
+export class AgentTimeoutError extends Error {
+  constructor(public readonly timeoutMs: number) {
+    super(`Agent invoke timed out after ${Math.round(timeoutMs / 1000)}s`)
+    this.name = 'AgentTimeoutError'
+  }
+}
+
 export interface AgentEngineConfig {
   llm: LlmConfig
   systemPrompt: string
@@ -22,10 +29,11 @@ export interface AgentEngineConfig {
   recursionLimit?: number
 }
 
-const DEFAULT_TIMEOUT_MS = 120_000
-const DEFAULT_TOOL_TIMEOUT_MS = 120_000
+const DEFAULT_TIMEOUT_MS = 600_000
+const DEFAULT_TOOL_TIMEOUT_MS = 180_000
 const DEFAULT_RECURSION_LIMIT = 50
 const EMPTY_RESPONSE_FALLBACK = '抱歉，我暂时无法生成有效回复，请稍后重试。'
+const TIMEOUT_RESPONSE_FALLBACK = '本次检索耗时较长，已达到处理时间上限。请缩小查询范围后重试，或稍后继续检索。'
 const MAX_TOOL_ERROR_MESSAGE_LENGTH = 800
 
 async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, ms: number): Promise<T> {
@@ -37,7 +45,7 @@ async function withTimeout<T>(run: (signal: AbortSignal) => Promise<T>, ms: numb
       new Promise<never>((_, reject) => {
         timeout = setTimeout(() => {
           controller.abort()
-          reject(new Error(`Agent invoke timed out after ${ms / 1000}s`))
+          reject(new AgentTimeoutError(ms))
         }, ms)
       }),
     ])
@@ -127,9 +135,14 @@ function wrapToolsForAgent(tools: StructuredTool[], timeoutMs: number): Structur
   })
 }
 
-export interface StreamCallbacks {
+export interface AgentProgressCallbacks {
+  onToolStart?: () => void | Promise<void>
+  onToolEnd?: () => void | Promise<void>
+  onOrganizing?: () => void | Promise<void>
+}
+
+export interface StreamCallbacks extends AgentProgressCallbacks {
   onToken: (token: string) => void | Promise<void>
-  onToolStart: (toolName: string) => void | Promise<void>
 }
 
 function extractTextContent(content: unknown): string {
@@ -190,18 +203,29 @@ function withCollectedFallback(history: BaseMessage[], collectedMessages: BaseMe
   return { messages: collectedMessages.length > 0 ? collectedMessages : history }
 }
 
-function createToolLogHandler(): BaseCallbackHandler {
+function createTimeoutResponse(messages: BaseMessage[] | undefined): string {
+  const partial = extractLastNonEmptyAiText(messages)
+  if (!partial) return TIMEOUT_RESPONSE_FALLBACK
+  return `${partial}\n\n本次检索已达到处理时间上限，以上为当前阶段性结果。你可以缩小查询范围后继续检索。`
+}
+
+function createToolLogHandler(callbacks: AgentProgressCallbacks = {}): BaseCallbackHandler {
   return new (class extends BaseCallbackHandler {
     name = 'tool-log-handler'
-    handleToolStart(tool: any, input: string) {
+    async handleToolStart(tool: any, input: string) {
       console.log(`[AgentEngine] Tool call start: name=${tool?.name ?? 'unknown'} input=${input}`)
+      await callbacks.onToolStart?.()
     }
-    handleToolEnd(output: string) {
+    async handleToolEnd(output: string) {
       const preview = output.length > 100 ? output.slice(0, 100) + '...' : output
       console.log(`[AgentEngine] Tool call end: ${preview}`)
+      await callbacks.onToolEnd?.()
+      await callbacks.onOrganizing?.()
     }
-    handleToolError(err: Error) {
+    async handleToolError(err: Error) {
       console.error(`[AgentEngine] Tool call error:`, err.message)
+      await callbacks.onToolEnd?.()
+      await callbacks.onOrganizing?.()
     }
   })()
 }
@@ -215,6 +239,14 @@ function buildHumanMessage(content: string | IncomingContent[]): HumanMessage {
         : { type: 'image_url' as const, image_url: { url: c.url } }
     ),
   })
+}
+
+export function __testConfiguredPositiveInt(envKey: string, fallback: number): number {
+  return configuredPositiveInt(envKey, fallback)
+}
+
+export function __testCreateTimeoutResponse(messages: BaseMessage[] | undefined): string {
+  return createTimeoutResponse(messages)
 }
 
 export function __testExtractLastNonEmptyAiText(messages: BaseMessage[] | undefined): string {
@@ -288,7 +320,8 @@ export class AgentEngine {
     sessionMessages: SessionMessage[],
     newContent: string | IncomingContent[],
     systemPrompt: string,
-    tools: StructuredTool[]
+    tools: StructuredTool[],
+    callbacks: AgentProgressCallbacks = {}
   ): Promise<string> {
     const agent = this.createAgentWithTools(tools, systemPrompt)
     const history = this.buildHistory(sessionMessages, newContent)
@@ -298,7 +331,7 @@ export class AgentEngine {
     if (tools.length === 0) console.log('[AgentEngine] No tools available; LLM cannot start tool calls')
 
     const collectedMessages: BaseMessage[] = []
-    const logHandler = createToolLogHandler()
+    const logHandler = createToolLogHandler(callbacks)
 
     try {
       await withTimeout(
@@ -319,6 +352,12 @@ export class AgentEngine {
         timeoutMs
       )
     } catch (err) {
+      if (err instanceof AgentTimeoutError) {
+        const messages = collectedMessages.length > 0 ? collectedMessages : history
+        const response = createTimeoutResponse(messages)
+        console.warn(`[AgentEngine] Agent timed out after ${timeoutMs}ms; returning partial response`)
+        return response
+      }
       if (!isGraphRecursionError(err)) throw err
       console.warn('[AgentEngine] Graph recursion limit reached; summarizing partial messages')
       const messages = collectedMessages.length > 0 ? collectedMessages : history
@@ -363,13 +402,20 @@ export class AgentEngine {
         accumulated += token
         await callbacks.onToken(token)
       }
-      async handleToolStart(_tool: any, input: string) {
-        try {
-          const parsed = JSON.parse(input)
-          await callbacks.onToolStart(parsed?.name ?? '工具')
-        } catch {
-          await callbacks.onToolStart('工具')
-        }
+      async handleToolStart(tool: any, input: string) {
+        console.log(`[AgentEngine] Tool call start: name=${tool?.name ?? 'unknown'} input=${input}`)
+        await callbacks.onToolStart?.()
+      }
+      async handleToolEnd(output: string) {
+        const preview = output.length > 100 ? output.slice(0, 100) + '...' : output
+        console.log(`[AgentEngine] Tool call end: ${preview}`)
+        await callbacks.onToolEnd?.()
+        await callbacks.onOrganizing?.()
+      }
+      async handleToolError(err: Error) {
+        console.error(`[AgentEngine] Tool call error:`, err.message)
+        await callbacks.onToolEnd?.()
+        await callbacks.onOrganizing?.()
       }
     })()
 
@@ -396,6 +442,12 @@ export class AgentEngine {
         timeoutMs
       )
     } catch (err) {
+      if (err instanceof AgentTimeoutError) {
+        const messages = collectedMessages.length > 0 ? collectedMessages : history
+        const response = accumulated.trim() || createTimeoutResponse(messages)
+        console.warn(`[AgentEngine] Agent stream timed out after ${timeoutMs}ms; returning partial response`)
+        return response
+      }
       if (!isGraphRecursionError(err)) throw err
       console.warn('[AgentEngine] Graph recursion limit reached during stream; summarizing partial messages')
       const messages = collectedMessages.length > 0 ? collectedMessages : history
