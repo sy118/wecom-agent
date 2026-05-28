@@ -210,6 +210,29 @@ wecomCommandConfigRouter.put('/command-permissions', async (req, res) => {
   res.json(permission)
 })
 
+wecomCommandConfigRouter.delete('/command-permissions/:id', async (req, res) => {
+  const botId = String((req.params as any).botId)
+  const permission = await CommandPermissionRepository.findById(req.params.id)
+  if (!permission || permission.botId !== botId) {
+    res.status(404).json({ error: 'Command permission not found' })
+    return
+  }
+  await CommandPermissionRepository.delete(permission.id)
+  await AuditLogRepository.create({
+    botId,
+    actorUserId: null,
+    action: 'admin.command.delete',
+    targetType: 'command_permission',
+    targetId: permission.id,
+    result: 'success',
+    payload: {
+      commandKey: permission.commandKey,
+      role: permission.role,
+    },
+  })
+  res.status(204).end()
+})
+
 wecomCommandConfigRouter.get('/feature-switches', async (req, res) => {
   const { botId } = req.params as { botId: string }
   const contextSwitch = await CommandPermissionRepository.check(botId, 'ctx.use', 'user')
@@ -325,7 +348,15 @@ wecomCommandConfigRouter.post('/model-configs', async (req, res) => {
 })
 
 wecomCommandConfigRouter.patch('/model-configs/:id', async (req, res) => {
+  const botId = String((req.params as any).botId)
+  const existing = await ModelConfigRepository.findById(req.params.id)
+  if (!existing || (existing.botId !== null && existing.botId !== botId)) {
+    res.status(404).json({ error: 'Model config not found' })
+    return
+  }
   const data = { ...req.body }
+  delete data.botId
+  delete data.id
   if (data.apiKey === '******') delete data.apiKey
   const updated = await ModelConfigRepository.update(req.params.id, {
     ...data,
@@ -333,6 +364,17 @@ wecomCommandConfigRouter.patch('/model-configs/:id', async (req, res) => {
   })
   if (!updated) { res.status(404).json({ error: 'Model config not found' }); return }
   res.json(maskModelSecret(updated))
+})
+
+wecomCommandConfigRouter.delete('/model-configs/:id', async (req, res) => {
+  const botId = String((req.params as any).botId)
+  const existing = await ModelConfigRepository.findById(req.params.id)
+  if (!existing || existing.botId !== botId) {
+    res.status(404).json({ error: 'Model config not found' })
+    return
+  }
+  await ModelConfigRepository.delete(req.params.id)
+  res.status(204).end()
 })
 
 function maskModelSecret<T extends { apiKey: string | null }>(model: T): T {

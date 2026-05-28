@@ -423,6 +423,13 @@ export const CommandPermissionRepository = {
     return res.rows[0] ? rowToCommandPermission(res.rows[0]) : null
   },
 
+  async delete(id: string): Promise<CommandPermission | null> {
+    const existing = await this.findById(id)
+    if (!existing) return null
+    await db.execute({ sql: 'DELETE FROM command_permissions WHERE id = ?', args: [id] })
+    return existing
+  },
+
   async check(botId: string, commandKey: string, role: WecomUserRole): Promise<{ allowed: boolean; requireConfirm: boolean }> {
     const res = await db.execute({
       sql: `SELECT * FROM command_permissions

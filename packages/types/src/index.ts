@@ -226,6 +226,8 @@ export interface IMAdapter {
   onEvent?(handler: (event: IncomingEvent) => Promise<void>): void
   /** Returns messageId if platform supports it (for later edit), otherwise void */
   sendMessage(chatId: string, text: string): Promise<void | string>
+  /** Sends a WeCom template_card payload when supported by the adapter. */
+  sendTemplateCard?(chatId: string, templateCard: Record<string, any>): Promise<void | string>
   /** Throws if platform does not support editing — caller must catch and fallback */
   editMessage(chatId: string, messageId: string, text: string): Promise<void>
 }

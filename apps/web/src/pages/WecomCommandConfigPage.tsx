@@ -59,12 +59,6 @@ interface CommandPermission {
   requireConfirm: boolean
 }
 
-interface FeatureSwitches {
-  contextSwitchEnabled: boolean
-  imageGenerationEnabled: boolean
-  adminCommandsEnabled: boolean
-}
-
 interface AuditLog {
   id: string
   action: string
@@ -84,6 +78,7 @@ interface ModelConfig {
   capability: string
   baseUrl: string | null
   apiKey: string | null
+  defaultParams: Record<string, any>
   enabled: boolean
   timeoutMs: number | null
   quotaPerUserDaily: number | null
@@ -202,11 +197,6 @@ export default function WecomCommandConfigPage() {
   const [permissions, setPermissions] = useState<CommandPermission[]>([])
   const [chatReferences, setChatReferences] = useState<ChatReference[]>([])
   const [modelConfigs, setModelConfigs] = useState<ModelConfig[]>([])
-  const [switches, setSwitches] = useState<FeatureSwitches>({
-    contextSwitchEnabled: true,
-    imageGenerationEnabled: true,
-    adminCommandsEnabled: true,
-  })
   const [auditLogs, setAuditLogs] = useState<AuditLog[]>([])
   const [loading, setLoading] = useState(false)
   const [userModalOpen, setUserModalOpen] = useState(false)
@@ -215,6 +205,7 @@ export default function WecomCommandConfigPage() {
   const [modelModalOpen, setModelModalOpen] = useState(false)
   const [editingUser, setEditingUser] = useState<WecomUser | null>(null)
   const [editingPermission, setEditingPermission] = useState<CommandPermission | null>(null)
+  const [editingModel, setEditingModel] = useState<ModelConfig | null>(null)
   const [userForm] = Form.useForm()
   const [grantForm] = Form.useForm()
   const [permissionForm] = Form.useForm()
@@ -256,12 +247,11 @@ export default function WecomCommandConfigPage() {
     if (!currentBotId) return
     setLoading(true)
     try {
-      const [contextData, userData, grantData, permissionData, switchData, auditData, modelData, bindingData, discoveredData] = await Promise.all([
+      const [contextData, userData, grantData, permissionData, auditData, modelData, bindingData, discoveredData] = await Promise.all([
         contextsApi.list(currentBotId),
         wecomCommandConfigApi.users(currentBotId),
         wecomCommandConfigApi.contextAccess(currentBotId),
         wecomCommandConfigApi.commandPermissions(currentBotId),
-        wecomCommandConfigApi.featureSwitches(currentBotId),
         wecomCommandConfigApi.auditLogs(currentBotId),
         wecomCommandConfigApi.modelConfigs(currentBotId, 'image_generation'),
         bindingsApi.list(currentBotId),
@@ -272,7 +262,6 @@ export default function WecomCommandConfigPage() {
       setGrants(grantData)
       setPermissions(permissionData)
       setChatReferences(mergeChatReferences(bindingData, discoveredData))
-      setSwitches(switchData)
       setAuditLogs(auditData)
       setModelConfigs(modelData)
     } catch (err: any) {
@@ -319,14 +308,28 @@ export default function WecomCommandConfigPage() {
     setPermissionModalOpen(true)
   }
 
-  const openModelModal = () => {
+  const openModelModal = (model?: ModelConfig) => {
+    setEditingModel(model ?? null)
     modelForm.resetFields()
-    modelForm.setFieldsValue({
-      provider: 'openai-compatible-image',
-      modelName: 'gpt-image2',
-      enabled: true,
-      timeoutMs: 120000,
-    })
+    modelForm.setFieldsValue(model
+      ? {
+          name: model.name,
+          provider: model.provider,
+          modelName: model.modelName,
+          baseUrl: model.baseUrl,
+          apiKey: model.apiKey ?? undefined,
+          timeoutMs: model.timeoutMs,
+          quotaPerUserDaily: model.quotaPerUserDaily,
+          maxConcurrent: model.maxConcurrent,
+          defaultParams: JSON.stringify(model.defaultParams ?? {}, null, 2),
+          enabled: model.enabled,
+        }
+      : {
+          provider: 'openai-compatible-image',
+          modelName: 'gpt-image2',
+          enabled: true,
+          timeoutMs: 120000,
+        })
     setModelModalOpen(true)
   }
 
@@ -426,12 +429,10 @@ export default function WecomCommandConfigPage() {
     }
   }
 
-  const updateSwitch = async (key: keyof FeatureSwitches, value: boolean) => {
+  const deletePermission = async (permission: CommandPermission) => {
     if (!botId) return
-    const next = { ...switches, [key]: value }
-    setSwitches(next)
-    await wecomCommandConfigApi.updateFeatureSwitches(botId, next)
-    message.success('功能开关已保存')
+    await wecomCommandConfigApi.deleteCommandPermission(botId, permission.id)
+    message.success('命令权限配置已删除')
     loadConfig()
   }
 
@@ -439,19 +440,33 @@ export default function WecomCommandConfigPage() {
     if (!botId) return
     try {
       const defaultParams = values.defaultParams ? JSON.parse(values.defaultParams) : {}
-      await wecomCommandConfigApi.createModelConfig(botId, {
+      const payload = {
         ...values,
         capability: 'image_generation',
         provider: values.provider ?? 'openai-compatible-image',
         defaultParams,
-      })
+      }
+      if (!payload.apiKey) delete payload.apiKey
+      if (editingModel) {
+        await wecomCommandConfigApi.updateModelConfig(botId, editingModel.id, payload)
+      } else {
+        await wecomCommandConfigApi.createModelConfig(botId, payload)
+      }
       modelForm.resetFields()
       setModelModalOpen(false)
-      message.success('图片模型配置已保存')
+      setEditingModel(null)
+      message.success(editingModel ? '图片模型配置已更新' : '图片模型配置已新增')
       loadConfig()
     } catch (err: any) {
       message.error(err?.response?.data?.error ?? '保存图片模型配置失败，请检查默认参数 JSON')
     }
+  }
+
+  const deleteModelConfig = async (model: ModelConfig) => {
+    if (!botId) return
+    await wecomCommandConfigApi.deleteModelConfig(botId, model.id)
+    message.success('图片模型配置已删除')
+    loadConfig()
   }
 
   const renderWecomUser = (wecomUserId: string) => {
@@ -578,38 +593,38 @@ export default function WecomCommandConfigPage() {
             key: 'commands',
             label: '命令权限',
             children: (
-              <Space direction="vertical" style={{ width: '100%' }} size={16}>
-                <Card title="功能开关" loading={loading}>
-                  <Space size={24} wrap>
-                    <Space>上下文切换 <Switch checked={switches.contextSwitchEnabled} onChange={(checked) => updateSwitch('contextSwitchEnabled', checked)} /></Space>
-                    <Space>图片生成 <Switch checked={switches.imageGenerationEnabled} onChange={(checked) => updateSwitch('imageGenerationEnabled', checked)} /></Space>
-                    <Space>管理命令 <Switch checked={switches.adminCommandsEnabled} onChange={(checked) => updateSwitch('adminCommandsEnabled', checked)} /></Space>
-                  </Space>
-                </Card>
-                <Card
-                  title="细粒度命令权限"
-                  loading={loading}
+              <Card
+                title="命令权限"
+                loading={loading}
                 extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => openPermissionModal()}>批量配置权限</Button>}
-                >
-                  <Table
-                    rowKey="id"
-                    loading={loading}
-                    dataSource={permissions}
-                    columns={[
-                      { title: '命令', dataIndex: 'commandKey', render: renderCommand },
-                      { title: '角色', dataIndex: 'role', render: (role: WecomUser['role']) => <Tag color={roleColor[role]}>{roleLabel[role]}</Tag> },
-                      { title: '是否启用', dataIndex: 'enabled', render: (enabled: boolean) => <Tag color={enabled ? 'green' : 'default'}>{enabled ? '启用' : '禁用'}</Tag> },
-                      { title: '二次确认', dataIndex: 'requireConfirm', render: (required: boolean) => required ? <Tag color="orange">需要确认</Tag> : <Tag>直接执行</Tag> },
-                      {
-                        title: '操作',
-                        render: (_: unknown, permission: CommandPermission) => (
+              >
+                <Table
+                  rowKey="id"
+                  loading={loading}
+                  dataSource={permissions}
+                  columns={[
+                    { title: '命令', dataIndex: 'commandKey', render: renderCommand },
+                    { title: '角色', dataIndex: 'role', render: (role: WecomUser['role']) => <Tag color={roleColor[role]}>{roleLabel[role]}</Tag> },
+                    { title: '是否启用', dataIndex: 'enabled', render: (enabled: boolean) => <Tag color={enabled ? 'green' : 'default'}>{enabled ? '启用' : '禁用'}</Tag> },
+                    { title: '二次确认', dataIndex: 'requireConfirm', render: (required: boolean) => required ? <Tag color="orange">需要确认</Tag> : <Tag>直接执行</Tag> },
+                    {
+                      title: '操作',
+                      render: (_: unknown, permission: CommandPermission) => (
+                        <Space>
                           <Button size="small" icon={<EditOutlined />} onClick={() => openPermissionModal(permission)}>编辑</Button>
-                        ),
-                      },
-                    ]}
-                  />
-                </Card>
-              </Space>
+                          <Popconfirm
+                            title="确认删除该命令权限配置？"
+                            description="删除后会回到系统默认权限；如果只是临时关闭，请改为禁用。"
+                            onConfirm={() => deletePermission(permission)}
+                          >
+                            <Button size="small" danger>删除</Button>
+                          </Popconfirm>
+                        </Space>
+                      ),
+                    },
+                  ]}
+                />
+              </Card>
             ),
           },
           {
@@ -619,7 +634,7 @@ export default function WecomCommandConfigPage() {
               <Card
                 title="图片生成模型"
                 loading={loading}
-                extra={<Button type="primary" icon={<PlusOutlined />} onClick={openModelModal}>新增模型</Button>}
+                extra={<Button type="primary" icon={<PlusOutlined />} onClick={() => openModelModal()}>新增模型</Button>}
               >
                 <Table
                   rowKey="id"
@@ -632,6 +647,17 @@ export default function WecomCommandConfigPage() {
                     { title: '状态', dataIndex: 'enabled', render: (enabled: boolean) => <Tag color={enabled ? 'green' : 'default'}>{enabled ? '启用' : '禁用'}</Tag> },
                     { title: '每日额度', dataIndex: 'quotaPerUserDaily', render: (value: number | null) => value ?? '不限' },
                     { title: '并发数', dataIndex: 'maxConcurrent', render: (value: number | null) => value ?? '不限' },
+                    {
+                      title: '操作',
+                      render: (_: unknown, model: ModelConfig) => (
+                        <Space>
+                          <Button size="small" icon={<EditOutlined />} onClick={() => openModelModal(model)}>编辑</Button>
+                          <Popconfirm title="确认删除该图片模型配置？" onConfirm={() => deleteModelConfig(model)}>
+                            <Button size="small" danger>删除</Button>
+                          </Popconfirm>
+                        </Space>
+                      ),
+                    },
                   ]}
                 />
               </Card>
@@ -776,18 +802,25 @@ export default function WecomCommandConfigPage() {
       </Modal>
 
       <Modal
-        title="新增图片生成模型"
+        title={editingModel ? '编辑图片生成模型' : '新增图片生成模型'}
         open={modelModalOpen}
         width={720}
         onOk={() => modelForm.submit()}
-        onCancel={() => setModelModalOpen(false)}
+        onCancel={() => { setModelModalOpen(false); setEditingModel(null) }}
         destroyOnClose
       >
         <Form form={modelForm} layout="vertical" onFinish={saveModelConfig}>
           <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入名称' }]}><Input /></Form.Item>
           <Form.Item name="modelName" label="模型名称" rules={[{ required: true, message: '请输入模型名称' }]}><Input /></Form.Item>
           <Form.Item name="baseUrl" label="接口地址" rules={[{ required: true, message: '请输入接口地址' }]}><Input /></Form.Item>
-          <Form.Item name="apiKey" label="密钥" rules={[{ required: true, message: '请输入密钥' }]}><Input.Password /></Form.Item>
+          <Form.Item
+            name="apiKey"
+            label="密钥"
+            rules={editingModel ? [] : [{ required: true, message: '请输入密钥' }]}
+            extra={editingModel ? '保留 ****** 或留空都表示不修改已有密钥。' : undefined}
+          >
+            <Input.Password />
+          </Form.Item>
           <Form.Item name="timeoutMs" label="超时时间（毫秒）"><Input type="number" /></Form.Item>
           <Form.Item name="quotaPerUserDaily" label="单用户每日额度"><Input type="number" placeholder="留空表示不限" /></Form.Item>
           <Form.Item name="maxConcurrent" label="最大并发数"><Input type="number" placeholder="留空表示不限" /></Form.Item>

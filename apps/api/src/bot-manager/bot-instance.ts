@@ -130,6 +130,11 @@ interface EffectiveContext {
   source: EffectiveContextSource
 }
 
+const CONTEXT_CARD_EVENT_KEY = 'ctx_use_submit'
+const CONTEXT_CARD_QUESTION_KEY = 'ctx_id'
+const CONTEXT_CARD_TASK_PREFIX = 'ctx_use_'
+const WECOM_SELECT_OPTION_LIMIT = 10
+
 export class BotInstance {
   private adapter: WecomAdapter
   private engine: AgentEngine | null = null
@@ -242,11 +247,7 @@ export class BotInstance {
     }
 
     if (command.commandKey === 'ctx.list') {
-      const contexts = actor.role === 'admin'
-        ? [...this.contextMap.values()].filter((context) => context.botId === this.deps.bot.id)
-        : (await ContextAccessRepository.listByUser(this.deps.bot.id, runtime.userId))
-            .map((grant) => this.contextMap.get(grant.contextId))
-            .filter((context): context is ContextConfig => Boolean(context))
+      const contexts = await this.getSwitchableContexts(runtime.userId, actor.role)
 
       if (contexts.length === 0) {
         return {
@@ -257,6 +258,19 @@ export class BotInstance {
           auditPayload: { count: 0 },
         }
       }
+
+      if (await this.sendContextSelectionCard(runtime, contexts)) {
+        return {
+          commandKey: command.commandKey,
+          ok: true,
+          status: 'success',
+          message: contexts.length > WECOM_SELECT_OPTION_LIMIT
+            ? '已发送上下文选择卡片。受企业微信选择器限制，本次只展示前 10 个上下文；未展示的上下文仍可用 /ctx use <上下文名称> 切换。'
+            : '已发送上下文选择卡片，请在卡片中选择后提交。',
+          auditPayload: { count: contexts.length, interaction: 'template_card' },
+        }
+      }
+
       return {
         commandKey: command.commandKey,
         ok: true,
@@ -332,6 +346,56 @@ export class BotInstance {
     }
 
     return null
+  }
+
+  private async getSwitchableContexts(userId: string, role: WecomCommandActor['role']): Promise<ContextConfig[]> {
+    if (role === 'admin') {
+      return [...this.contextMap.values()].filter((context) => context.botId === this.deps.bot.id)
+    }
+    return (await ContextAccessRepository.listByUser(this.deps.bot.id, userId))
+      .map((grant) => this.contextMap.get(grant.contextId))
+      .filter((context): context is ContextConfig => Boolean(context))
+  }
+
+  private async sendContextSelectionCard(runtime: WecomCommandRuntime, contexts: ContextConfig[]): Promise<boolean> {
+    if (!this.adapter.sendTemplateCard) return false
+    const options = contexts.slice(0, WECOM_SELECT_OPTION_LIMIT).map((context) => ({
+      id: context.id,
+      text: this.templateOptionText(context.name || context.id),
+    }))
+    if (options.length === 0) return false
+    try {
+      await this.adapter.sendTemplateCard(runtime.chatId, {
+        card_type: 'multiple_interaction',
+        source: { desc: '上下文' },
+        main_title: {
+          title: '切换上下文',
+          desc: this.isGroupChat(runtime.chatKey) ? '提交后对本群立即生效' : '提交后对当前会话立即生效',
+        },
+        select_list: [
+          {
+            question_key: CONTEXT_CARD_QUESTION_KEY,
+            title: '上下文',
+            selected_id: options[0].id,
+            option_list: options,
+          },
+        ],
+        submit_button: {
+          text: '切换',
+          key: CONTEXT_CARD_EVENT_KEY,
+        },
+        task_id: `${CONTEXT_CARD_TASK_PREFIX}${randomUUID()}`,
+      })
+      return true
+    } catch (err) {
+      console.error(`[BotInstance:${this.deps.bot.id}] Failed to send context selection card:`, err)
+      return false
+    }
+  }
+
+  private templateOptionText(value: string): string {
+    const text = value.trim() || '未命名'
+    return text.length > 10 ? text.slice(0, 9) + '…' : text
   }
 
   private findContextByIdOrName(value: string): ContextConfig | null {
@@ -474,6 +538,7 @@ export class BotInstance {
       message: [
         '已创建图片生成任务。',
         `任务 ID：${task.id}`,
+        '任务完成后会自动推送结果到当前企微会话。',
         `查询状态：/task status ${task.id}`,
         `获取结果：/task result ${task.id}`,
       ].join('\n'),
@@ -661,6 +726,54 @@ export class BotInstance {
       await handleIncomingWecomEvent(event, { botId: this.deps.bot.id, contexts: this.deps.contexts })
     } catch (err) {
       console.error(`[BotInstance:${this.deps.bot.id}] Failed to handle WeCom event ${event.eventType}:`, err)
+    }
+
+    try {
+      const message = await this.handleTemplateCardEvent(event)
+      if (message && event.chatId) await this.adapter.sendMessage(event.chatId, message).catch(() => {})
+    } catch (err) {
+      console.error(`[BotInstance:${this.deps.bot.id}] Failed to handle WeCom template card event:`, err)
+      if (event.chatId) await this.adapter.sendMessage(event.chatId, '处理卡片操作失败，请稍后重试。').catch(() => {})
+    }
+  }
+
+  private async handleTemplateCardEvent(event: IncomingEvent): Promise<string | null> {
+    if (event.eventType !== 'template_card_event') return null
+    const cardEvent = event.eventPayload?.template_card_event
+    if (!cardEvent || typeof cardEvent !== 'object') return null
+    if (cardEvent.event_key !== CONTEXT_CARD_EVENT_KEY) return null
+    if (!String(cardEvent.task_id ?? '').startsWith(CONTEXT_CARD_TASK_PREFIX)) return null
+
+    const contextId = this.selectedTemplateCardOption(cardEvent, CONTEXT_CARD_QUESTION_KEY)
+    if (!contextId) return '未读取到选择的上下文，请重新打开上下文选择卡片后再试。'
+
+    const command = this.createEventCommand('ctx.use', [contextId])
+    const result = await this.commandExecutor.execute(command, {
+      botId: this.deps.bot.id,
+      chatKey: event.chatKey,
+      chatId: event.chatId ?? event.userId,
+      userId: event.userId,
+    })
+    return result.message
+  }
+
+  private selectedTemplateCardOption(cardEvent: Record<string, any>, questionKey: string): string | null {
+    const selectedItems = cardEvent.selected_items?.selected_item
+    if (!Array.isArray(selectedItems)) return null
+    const item = selectedItems.find((entry) => entry?.question_key === questionKey)
+    const optionIds = item?.option_ids?.option_id
+    return Array.isArray(optionIds) && optionIds[0] ? String(optionIds[0]) : null
+  }
+
+  private createEventCommand(commandKey: ParsedWecomCommand['commandKey'], args: string[]): ParsedWecomCommand {
+    return {
+      raw: `event:${commandKey}`,
+      commandText: `event:${commandKey}`,
+      commandKey,
+      base: 'event',
+      subcommand: commandKey,
+      args,
+      isKnown: true,
     }
   }
 

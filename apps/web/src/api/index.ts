@@ -52,6 +52,8 @@ export const wecomCommandConfigApi = {
   commandPermissions: (botId: string) => api.get(`/bots/${botId}/wecom-command-config/command-permissions`).then((r) => r.data),
   setCommandPermission: (botId: string, data: unknown) =>
     api.put(`/bots/${botId}/wecom-command-config/command-permissions`, data).then((r) => r.data),
+  deleteCommandPermission: (botId: string, id: string) =>
+    api.delete(`/bots/${botId}/wecom-command-config/command-permissions/${id}`),
   featureSwitches: (botId: string) => api.get(`/bots/${botId}/wecom-command-config/feature-switches`).then((r) => r.data),
   updateFeatureSwitches: (botId: string, data: unknown) =>
     api.put(`/bots/${botId}/wecom-command-config/feature-switches`, data).then((r) => r.data),
@@ -62,6 +64,8 @@ export const wecomCommandConfigApi = {
     api.post(`/bots/${botId}/wecom-command-config/model-configs`, data).then((r) => r.data),
   updateModelConfig: (botId: string, id: string, data: unknown) =>
     api.patch(`/bots/${botId}/wecom-command-config/model-configs/${id}`, data).then((r) => r.data),
+  deleteModelConfig: (botId: string, id: string) =>
+    api.delete(`/bots/${botId}/wecom-command-config/model-configs/${id}`),
 }
 
 export const mcpServersApi = {

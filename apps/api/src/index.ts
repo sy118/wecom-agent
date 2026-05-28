@@ -7,6 +7,8 @@ import { initDb } from './db/client.js'
 import { BotRepository } from './db/bot-repository.js'
 import { botManager } from './bot-manager/bot-manager.js'
 import { TaskScheduler } from './scheduler/task-scheduler.js'
+import { generationTaskRunner } from './services/generation-task-runner.js'
+import { formatGenerationTaskResult, listGeneratedFilesForTask } from './services/generation-task-service.js'
 import { authMiddleware } from './middleware/auth.js'
 import { authRouter } from './routes/auth.js'
 import { botsRouter } from './routes/bots.js'
@@ -67,6 +69,24 @@ async function main(): Promise<void> {
     autoStartBots(botsToAutoStart)
   })
 }
+
+generationTaskRunner.on('finished', async ({ task }) => {
+  if (!task.chatId) return
+  try {
+    const files = await listGeneratedFilesForTask(task)
+    const taskName = task.taskType === 'image' ? '图片生成' : '生成任务'
+    const prefix = task.status === 'succeeded'
+      ? `${taskName}已完成，结果如下：`
+      : `${taskName}失败，详情如下：`
+    await botManager.sendMessageForTask(
+      task.botId,
+      task.chatId,
+      `${prefix}\n${formatGenerationTaskResult(task, files, process.env.PUBLIC_BASE_URL)}`
+    )
+  } catch (err) {
+    console.error(`[GenerationTaskRunner] Failed to push task result ${task.id}:`, err)
+  }
+})
 
 async function autoStartBots(bots: BotConfig[]): Promise<void> {
   if (bots.length === 0) {
