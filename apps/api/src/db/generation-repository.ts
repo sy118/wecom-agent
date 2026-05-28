@@ -200,6 +200,13 @@ export const ModelConfigRepository = {
     await db.execute({ sql: `UPDATE model_configs SET ${fields.join(', ')} WHERE id = ?`, args })
     return this.findById(id)
   },
+
+  async delete(id: string): Promise<ModelConfig | null> {
+    const existing = await this.findById(id)
+    if (!existing) return null
+    await db.execute({ sql: 'DELETE FROM model_configs WHERE id = ?', args: [id] })
+    return existing
+  },
 }
 
 export const GenerationTaskRepository = {

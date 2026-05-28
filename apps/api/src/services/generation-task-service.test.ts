@@ -161,12 +161,15 @@ test('GenerationTaskRunner executes tasks asynchronously and fails disabled task
     await new Promise((resolve) => setTimeout(resolve, 50))
     return { outputFileIds: [], cost: 0.01 }
   })
+  const finished: string[] = []
+  runner.on('finished', ({ task }) => finished.push(`${task.id}:${task.status}`))
 
   const startedAt = Date.now()
   runner.enqueue(imageTask.id)
   assert.equal(Date.now() - startedAt < 20, true)
   await waitFor(async () => (await GenerationTaskRepository.findById(imageTask.id))?.status === 'succeeded')
   assert.equal((await GenerationTaskRepository.findById(imageTask.id))?.cost, 0.01)
+  assert.deepEqual(finished, [`${imageTask.id}:succeeded`])
 
   const pptTask = await GenerationTaskRepository.create({
     botId: bot.id,
@@ -178,6 +181,7 @@ test('GenerationTaskRunner executes tasks asynchronously and fails disabled task
   runner.enqueue(pptTask.id)
   await waitFor(async () => (await GenerationTaskRepository.findById(pptTask.id))?.status === 'failed')
   assert.match((await GenerationTaskRepository.findById(pptTask.id))?.error ?? '', /not enabled/)
+  assert.equal(finished.some((item) => item === `${pptTask.id}:failed`), true)
 })
 
 test('image generation processor saves files on success', async () => {

@@ -104,6 +104,10 @@ export class WecomAdapter implements IMAdapter {
     await this.client.sendMessage(chatId, { msgtype: 'markdown', markdown: { content: text } })
   }
 
+  async sendTemplateCard(chatId: string, templateCard: Record<string, any>): Promise<void | string> {
+    await this.client.sendMessage(chatId, { msgtype: 'template_card', template_card: templateCard } as any)
+  }
+
   /**
    * Send a stream-capable thinking message. Returns a streamId that can be used
    * with editMessage to update the message content via WeCom stream protocol.

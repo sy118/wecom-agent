@@ -174,12 +174,15 @@ async function waitFor(assertion: () => boolean | Promise<boolean>, timeoutMs = 
 
 function makeFakeAdapter() {
   const sent: Array<{ chatId: string; text: string }> = []
+  const cards: Array<{ chatId: string; card: Record<string, any> }> = []
   const streams: Array<{ text: string; feedbackId?: string | null; finish?: boolean }> = []
   return {
     sent,
+    cards,
     streams,
     isReconnecting: () => false,
     sendMessage: async (chatId: string, text: string) => { sent.push({ chatId, text }) },
+    sendTemplateCard: async (chatId: string, card: Record<string, any>) => { cards.push({ chatId, card }) },
     sendThinkingWithStream: async (_frame: any, text: string, feedbackId?: string | null) => {
       streams.push({ text, feedbackId, finish: false })
       return `stream-${streams.length}`
@@ -481,6 +484,71 @@ test('BotInstance context commands switch immediately and isolate sessions', asy
 
     assert.equal(usedPrompt, targetContext.systemPrompt)
     assert.equal(messageCount, 0)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance sends context selection cards and handles template card events', async () => {
+  const bot = await makePersistedBot()
+  const targetContext = await makePersistedContext(bot.id, 'Card Target')
+  await WecomUserRepository.upsert({ botId: bot.id, wecomUserId: 'card-user', role: 'user' })
+  await ContextAccessRepository.grant({
+    botId: bot.id,
+    contextId: targetContext.id,
+    wecomUserId: 'card-user',
+  })
+
+  const chatKey = `wecom:user:card-${Date.now()}`
+  const instance = makeInstanceForBot(bot, [targetContext])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = adapter
+    await (instance as any).handleMessage({
+      chatId: 'card-chat-id',
+      chatKey,
+      chatType: 'single',
+      userId: 'card-user',
+      content: '/ctx list',
+      rawBody: { msgid: `ctx-list-card-${Date.now()}` },
+    })
+
+    assert.equal(adapter.cards.length, 1)
+    assert.equal(adapter.cards[0].card.card_type, 'multiple_interaction')
+    assert.equal(adapter.cards[0].card.submit_button.key, 'ctx_use_submit')
+
+    await (instance as any).handleEvent({
+      msgId: `ctx-card-event-${Date.now()}`,
+      eventType: 'template_card_event',
+      aibotId: bot.wecomBotId,
+      chatId: 'card-chat-id',
+      chatKey,
+      chatType: 'single',
+      userId: 'card-user',
+      corpid: null,
+      responseUrl: null,
+      createTime: Date.now(),
+      rawBody: {},
+      eventPayload: {
+        eventtype: 'template_card_event',
+        template_card_event: {
+          card_type: 'multiple_interaction',
+          event_key: 'ctx_use_submit',
+          task_id: adapter.cards[0].card.task_id,
+          selected_items: {
+            selected_item: [
+              {
+                question_key: 'ctx_id',
+                option_ids: { option_id: [targetContext.id] },
+              },
+            ],
+          },
+        },
+      },
+    })
+
+    assert.equal((await ActiveContextRepository.findForUser(bot.id, chatKey, 'card-user'))?.contextId, targetContext.id)
+    assert.equal(adapter.sent.some((item) => item.text.includes(targetContext.name)), true)
   } finally {
     ;(instance as any).sessions.destroy()
   }

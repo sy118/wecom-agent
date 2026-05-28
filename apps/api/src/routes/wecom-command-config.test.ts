@@ -182,6 +182,12 @@ test('WeCom command config API manages command permissions, feature switches, co
     requireConfirm: true,
   })
 
+  const deletedPermission = await requestJson(`/api/bots/${bot.id}/wecom-command-config/command-permissions/${permission.body.id}`, {
+    method: 'DELETE',
+  })
+  assert.equal(deletedPermission.response.status, 204)
+  assert.equal(await CommandPermissionRepository.findById(permission.body.id), null)
+
   const confirmation = await requestJson(`/api/bots/${bot.id}/wecom-command-config/confirmations`, {
     method: 'POST',
     body: JSON.stringify({
@@ -242,4 +248,12 @@ test('WeCom command config API manages image model configs without exposing api 
   assert.equal(updated.response.status, 200)
   assert.equal(updated.body.enabled, false)
   assert.equal(updated.body.apiKey, '******')
+
+  const deleted = await requestJson(`/api/bots/${bot.id}/wecom-command-config/model-configs/${created.body.id}`, {
+    method: 'DELETE',
+  })
+  assert.equal(deleted.response.status, 204)
+
+  const afterDelete = await requestJson(`/api/bots/${bot.id}/wecom-command-config/model-configs?capability=image_generation`)
+  assert.equal(afterDelete.body.length, 0)
 })

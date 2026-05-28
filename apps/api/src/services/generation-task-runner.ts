@@ -1,3 +1,4 @@
+import { EventEmitter } from 'events'
 import { GenerationTaskRepository } from '../db/generation-repository.js'
 import { AuditLogRepository } from '../db/wecom-access-repository.js'
 import { logStructured } from './observability.js'
@@ -10,12 +11,20 @@ export interface GenerationTaskProcessorResult {
 
 export type GenerationTaskProcessor = (task: GenerationTask) => Promise<GenerationTaskProcessorResult>
 
-export class GenerationTaskRunner {
+export interface GenerationTaskFinishedEvent {
+  task: GenerationTask
+  result: 'success' | 'failure'
+  reason: string | null
+}
+
+export class GenerationTaskRunner extends EventEmitter {
   private processors = new Map<GenerationTaskType, GenerationTaskProcessor>()
   private queue: string[] = []
   private running = 0
 
-  constructor(private maxConcurrent = Number(process.env.GENERATION_TASK_CONCURRENCY ?? 1)) {}
+  constructor(private maxConcurrent = Number(process.env.GENERATION_TASK_CONCURRENCY ?? 1)) {
+    super()
+  }
 
   register(taskType: GenerationTaskType, processor: GenerationTaskProcessor): void {
     this.processors.set(taskType, processor)
@@ -46,21 +55,29 @@ export class GenerationTaskRunner {
     if (!task) return
     const processor = this.processors.get(task.taskType)
     if (!processor) {
-      await GenerationTaskRepository.markFailed(task.id, `Task type is not enabled: ${task.taskType}`)
-      await this.audit(task, 'failure', `Task type is not enabled: ${task.taskType}`)
+      const reason = `Task type is not enabled: ${task.taskType}`
+      const failed = await GenerationTaskRepository.markFailed(task.id, reason)
+      await this.audit(failed ?? task, 'failure', reason)
+      if (failed) this.emitFinished(failed, 'failure', reason)
       return
     }
     const runningTask = await GenerationTaskRepository.markRunning(task.id)
     if (!runningTask || runningTask.status !== 'running') return
     try {
       const result = await processor(runningTask)
-      await GenerationTaskRepository.markSucceeded(task.id, result.outputFileIds ?? [], result.cost ?? null)
-      await this.audit(task, 'success', null, { outputFileIds: result.outputFileIds ?? [], cost: result.cost ?? null })
+      const succeeded = await GenerationTaskRepository.markSucceeded(task.id, result.outputFileIds ?? [], result.cost ?? null)
+      await this.audit(succeeded ?? runningTask, 'success', null, { outputFileIds: result.outputFileIds ?? [], cost: result.cost ?? null })
+      if (succeeded) this.emitFinished(succeeded, 'success', null)
     } catch (err) {
       const reason = err instanceof Error ? err.message : String(err)
-      await GenerationTaskRepository.markFailed(task.id, reason)
-      await this.audit(task, 'failure', reason)
+      const failed = await GenerationTaskRepository.markFailed(task.id, reason)
+      await this.audit(failed ?? runningTask, 'failure', reason)
+      if (failed) this.emitFinished(failed, 'failure', reason)
     }
+  }
+
+  private emitFinished(task: GenerationTask, result: 'success' | 'failure', reason: string | null): void {
+    this.emit('finished', { task, result, reason } satisfies GenerationTaskFinishedEvent)
   }
 
   private async audit(task: GenerationTask, result: 'success' | 'failure', reason: string | null, payload: Record<string, any> = {}): Promise<void> {
