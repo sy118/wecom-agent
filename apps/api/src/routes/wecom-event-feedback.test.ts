@@ -22,6 +22,7 @@ const [
   { WikiRetrievalLogRepository },
   { WikiFeedbackRepository },
   { WecomEventRepository },
+  { botManager },
   { handleIncomingWecomEvent },
   { wikiRouter },
   { wecomEventsRouter },
@@ -33,6 +34,7 @@ const [
   import('../db/wiki-retrieval-log-repository.js'),
   import('../db/wiki-feedback-repository.js'),
   import('../db/wecom-event-repository.js'),
+  import('../bot-manager/bot-manager.js'),
   import('../services/wecom-event-service.js'),
   import('./wiki.js'),
   import('./wecom-events.js'),
@@ -229,4 +231,39 @@ test('WeCom feedback event links response run, drafts Wiki knowledge, and create
   })
   assert.equal(callback.response.status, 200)
   assert.deepEqual(callback.body, {})
+
+  const originalHandleWecomEvent = botManager.handleWecomEvent.bind(botManager)
+  let runtimeEventType: string | null = null
+  let runtimeEventKey: string | null = null
+  ;(botManager as any).handleWecomEvent = async (_botId: string, incoming: any) => {
+    runtimeEventType = incoming.eventType
+    runtimeEventKey = incoming.eventPayload?.template_card_event?.event_key ?? null
+    return true
+  }
+  try {
+    const cardCallback = await requestJson(`/api/wecom/events/${bot.id}`, {
+      method: 'POST',
+      body: JSON.stringify({
+        msgid: 'event-card-1',
+        msgtype: 'event',
+        aibotid: 'aibot-1',
+        chatid: 'chat-1',
+        chattype: 'group',
+        from: { userid: 'user-1' },
+        event: {
+          eventtype: 'template_card_event',
+          template_card_event: {
+            card_type: 'button_interaction',
+            event_key: 'menu_ctx_current',
+            task_id: 'menu_test',
+          },
+        },
+      }),
+    })
+    assert.equal(cardCallback.response.status, 200)
+    assert.equal(runtimeEventType, 'template_card_event')
+    assert.equal(runtimeEventKey, 'menu_ctx_current')
+  } finally {
+    ;(botManager as any).handleWecomEvent = originalHandleWecomEvent
+  }
 })

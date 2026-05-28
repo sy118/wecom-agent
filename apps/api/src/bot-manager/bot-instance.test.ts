@@ -18,6 +18,7 @@ const [
   { ActiveContextRepository, ContextAccessRepository, WecomUserRepository },
   { GeneratedFileRepository, GenerationTaskRepository, ModelConfigRepository },
   { BotResponseRunRepository },
+  { generationTaskRunner },
 ] = await Promise.all([
   import('./bot-instance.js'),
   import('../db/client.js'),
@@ -27,6 +28,7 @@ const [
   import('../db/wecom-access-repository.js'),
   import('../db/generation-repository.js'),
   import('../db/bot-response-run-repository.js'),
+  import('../services/generation-task-runner.js'),
 ])
 
 const {
@@ -554,6 +556,44 @@ test('BotInstance sends context selection cards and handles template card events
   }
 })
 
+test('BotInstance sends menu cards for help and enter-chat events', async () => {
+  const bot = await makePersistedBot()
+  await WecomUserRepository.upsert({ botId: bot.id, wecomUserId: 'menu-user', role: 'user' })
+  const instance = makeInstanceForBot(bot, [])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = adapter
+    await (instance as any).handleMessage({
+      chatId: 'menu-chat-id',
+      chatKey: 'wecom:user:menu-user',
+      chatType: 'single',
+      userId: 'menu-user',
+      content: '/help',
+      rawBody: { msgid: `help-menu-${Date.now()}` },
+    })
+    assert.equal(adapter.cards.some((item) => item.card.card_type === 'button_interaction'), true)
+    assert.equal(adapter.cards.some((item) => item.card.button_list?.some((button: any) => button.key === 'menu_ctx_list')), true)
+
+    await (instance as any).handleEvent({
+      msgId: `enter-menu-${Date.now()}`,
+      eventType: 'enter_chat',
+      aibotId: bot.wecomBotId,
+      chatId: 'menu-chat-id',
+      chatKey: 'wecom:user:menu-user',
+      chatType: 'single',
+      userId: 'menu-user',
+      corpid: null,
+      responseUrl: null,
+      createTime: Date.now(),
+      rawBody: {},
+      eventPayload: { eventtype: 'enter_chat' },
+    })
+    assert.equal(adapter.cards.length >= 2, true)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
 test('BotInstance does not clear sessions on failed context switch and shares group runtime context', async () => {
   const bot = await makePersistedBot()
   const boundContext = await makePersistedContext(bot.id, 'Group Bound')
@@ -755,6 +795,39 @@ test('BotInstance validates image command model configuration and quota before c
     assert.equal(quotaAdapter.sent.some((item) => item.text.includes('额度已用完')), true)
   } finally {
     ;(quotaInstance as any).sessions.destroy()
+  }
+
+  const successBot = await makePersistedBot()
+  await WecomUserRepository.upsert({ botId: successBot.id, wecomUserId: 'image-user', role: 'user' })
+  await ModelConfigRepository.create({
+    botId: successBot.id,
+    name: 'Image model',
+    provider: 'openai-compatible-image',
+    modelName: 'gpt-image2',
+    capability: 'image_generation',
+    baseUrl: 'https://image.example.invalid/v1',
+    apiKey: 'key',
+    enabled: true,
+  })
+  const successInstance = makeInstanceForBot(successBot, [])
+  const successAdapter = makeFakeAdapter()
+  const originalEnqueue = generationTaskRunner.enqueue.bind(generationTaskRunner)
+  try {
+    ;(successInstance as any).adapter = successAdapter
+    ;(generationTaskRunner as any).enqueue = () => {}
+    await (successInstance as any).handleMessage({
+      chatId: 'image-chat-id',
+      chatKey: 'wecom:user:image-success',
+      chatType: 'single',
+      userId: 'image-user',
+      content: '/image a launch poster',
+      rawBody: { msgid: `image-success-${Date.now()}` },
+    })
+    assert.equal(successAdapter.cards.some((item) => item.card.task_id?.startsWith('gen_task_')), true)
+    assert.equal(successAdapter.cards.some((item) => item.card.button_list?.some((button: any) => button.key === 'task_result')), true)
+  } finally {
+    ;(generationTaskRunner as any).enqueue = originalEnqueue
+    ;(successInstance as any).sessions.destroy()
   }
 })
 
