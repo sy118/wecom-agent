@@ -14,12 +14,18 @@ const [
   { db, initDb },
   { WikiRetrievalLogRepository },
   { BotRepository },
+  { ContextRepository },
+  { ActiveContextRepository, ContextAccessRepository, WecomUserRepository },
+  { GeneratedFileRepository, GenerationTaskRepository, ModelConfigRepository },
   { BotResponseRunRepository },
 ] = await Promise.all([
   import('./bot-instance.js'),
   import('../db/client.js'),
   import('../db/wiki-retrieval-log-repository.js'),
   import('../db/bot-repository.js'),
+  import('../db/context-repository.js'),
+  import('../db/wecom-access-repository.js'),
+  import('../db/generation-repository.js'),
   import('../db/bot-response-run-repository.js'),
 ])
 
@@ -144,12 +150,35 @@ async function makePersistedBot(overrides: Partial<Omit<BotConfig, 'id' | 'statu
   })
 }
 
+async function makePersistedContext(botId: string, name: string, overrides: Partial<ContextConfig> = {}) {
+  return ContextRepository.create({
+    botId,
+    name,
+    systemPrompt: `${name} prompt`,
+    mcpConfigs: [],
+    skillConfigs: [],
+    sessionTtlMin: 30,
+    isDefault: false,
+    ...overrides,
+  })
+}
+
+async function waitFor(assertion: () => boolean | Promise<boolean>, timeoutMs = 1000): Promise<void> {
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await assertion()) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.equal(await assertion(), true)
+}
+
 function makeFakeAdapter() {
   const sent: Array<{ chatId: string; text: string }> = []
   const streams: Array<{ text: string; feedbackId?: string | null; finish?: boolean }> = []
   return {
     sent,
     streams,
+    isReconnecting: () => false,
     sendMessage: async (chatId: string, text: string) => { sent.push({ chatId, text }) },
     sendThinkingWithStream: async (_frame: any, text: string, feedbackId?: string | null) => {
       streams.push({ text, feedbackId, finish: false })
@@ -355,6 +384,309 @@ test('BotInstance updates and removes individual runtime bindings', () => {
     assert.equal((instance as any).bindingMap.has('wecom:group:runtime'), false)
   } finally {
     ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance handles slash commands before context routing and LLM flow', async () => {
+  const bot = await makePersistedBot()
+  const instance = makeInstanceForBot(bot, [])
+  const adapter = makeFakeAdapter()
+  let invoked = false
+  try {
+    ;(instance as any).adapter = adapter
+    ;(instance as any).engine = {
+      invokeWithTools: async () => {
+        invoked = true
+        return 'should not be called'
+      },
+    }
+
+    await (instance as any).handleMessage({
+      chatId: 'cmd-chat-id',
+      chatKey: `wecom:user:cmd-${Date.now()}`,
+      chatType: 'single',
+      userId: 'cmd-user',
+      content: '/unknown',
+      rawBody: { msgid: `cmd-${Date.now()}` },
+    })
+
+    assert.equal(invoked, false)
+    assert.equal(adapter.sent.length, 1)
+    assert.match(adapter.sent[0].text, /未知命令/)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance context commands switch immediately and isolate sessions', async () => {
+  const bot = await makePersistedBot()
+  const boundContext = await makePersistedContext(bot.id, 'Bound')
+  const targetContext = await makePersistedContext(bot.id, 'Target')
+  await WecomUserRepository.upsert({ botId: bot.id, wecomUserId: 'user-a', role: 'user' })
+  await ContextAccessRepository.grant({
+    botId: bot.id,
+    contextId: targetContext.id,
+    wecomUserId: 'user-a',
+  })
+
+  const chatKey = `wecom:group:ctx-${Date.now()}`
+  const instance = new BotInstance({
+    bot,
+    contexts: [boundContext, targetContext],
+    bindings: [makeBinding({ botId: bot.id, chatKey, contextId: boundContext.id })],
+    mcpServers: [],
+    skills: [],
+    db: db as any,
+  })
+  const adapter = makeFakeAdapter()
+  let usedPrompt = ''
+  let messageCount = -1
+  try {
+    ;(instance as any).adapter = adapter
+    ;(instance as any).engine = {
+      invokeWithTools: async (messages: unknown[], _content: unknown, systemPrompt: string) => {
+        usedPrompt = systemPrompt
+        messageCount = messages.length
+        return 'context answer'
+      },
+    }
+    await (instance as any).sessions.getOrCreate(chatKey, boundContext.id, 30)
+    await (instance as any).sessions.setDifyConversationId(chatKey, 'old-conversation')
+
+    await (instance as any).handleMessage({
+      chatId: 'ctx-chat-id',
+      chatKey,
+      chatType: 'group',
+      userId: 'user-a',
+      content: `/ctx use ${targetContext.id}`,
+      rawBody: { msgid: `ctx-use-${Date.now()}` },
+    })
+
+    assert.equal(adapter.sent.some((item) => item.text.includes(targetContext.name)), true)
+    const active = await ActiveContextRepository.findForChat(bot.id, chatKey)
+    assert.equal(active?.contextId, targetContext.id)
+    assert.equal(active?.scope, 'chat')
+    assert.equal(active?.wecomUserId, null)
+    assert.equal((await (instance as any).sessions.getAll()).filter((session: any) => session.chatKey === chatKey).length, 0)
+
+    await (instance as any).handleMessage({
+      chatId: 'ctx-chat-id',
+      chatKey,
+      chatType: 'group',
+      userId: 'user-a',
+      content: 'hello after switch',
+      rawBody: { msgid: `ctx-normal-${Date.now()}` },
+    })
+    await waitFor(() => usedPrompt === targetContext.systemPrompt)
+
+    assert.equal(usedPrompt, targetContext.systemPrompt)
+    assert.equal(messageCount, 0)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance does not clear sessions on failed context switch and shares group runtime context', async () => {
+  const bot = await makePersistedBot()
+  const boundContext = await makePersistedContext(bot.id, 'Group Bound')
+  const targetContext = await makePersistedContext(bot.id, 'Group Target')
+  await WecomUserRepository.upsert({ botId: bot.id, wecomUserId: 'user-a', role: 'user' })
+  await WecomUserRepository.upsert({ botId: bot.id, wecomUserId: 'user-b', role: 'user' })
+  await ContextAccessRepository.grant({
+    botId: bot.id,
+    contextId: targetContext.id,
+    wecomUserId: 'user-a',
+  })
+
+  const chatKey = `wecom:group:isolated-${Date.now()}`
+  const instance = new BotInstance({
+    bot,
+    contexts: [boundContext, targetContext],
+    bindings: [makeBinding({ botId: bot.id, chatKey, contextId: boundContext.id })],
+    mcpServers: [],
+    skills: [],
+    db: db as any,
+  })
+  const adapter = makeFakeAdapter()
+  const prompts: string[] = []
+  try {
+    ;(instance as any).adapter = adapter
+    ;(instance as any).engine = {
+      invokeWithTools: async (_messages: unknown[], _content: unknown, systemPrompt: string) => {
+        prompts.push(systemPrompt)
+        return 'group answer'
+      },
+    }
+    const existing = await (instance as any).sessions.getOrCreate(chatKey, boundContext.id, 30)
+
+    await (instance as any).handleMessage({
+      chatId: 'ctx-chat-id',
+      chatKey,
+      chatType: 'group',
+      userId: 'user-b',
+      content: `/ctx use ${targetContext.id}`,
+      rawBody: { msgid: `ctx-denied-${Date.now()}` },
+    })
+    assert.equal(adapter.sent.some((item) => item.text.includes('没有切换权限') || item.text.includes('未找到可访问')), true)
+    assert.equal((await (instance as any).sessions.get(chatKey))?.id, existing.id)
+
+    await (instance as any).handleMessage({
+      chatId: 'ctx-chat-id',
+      chatKey,
+      chatType: 'group',
+      userId: 'user-a',
+      content: `/ctx use ${targetContext.id}`,
+      rawBody: { msgid: `ctx-user-a-${Date.now()}` },
+    })
+    const active = await ActiveContextRepository.findForChat(bot.id, chatKey)
+    assert.equal(active?.contextId, targetContext.id)
+    await (instance as any).handleMessage({
+      chatId: 'ctx-chat-id',
+      chatKey,
+      chatType: 'group',
+      userId: 'user-b',
+      content: 'hello from user b',
+      rawBody: { msgid: `ctx-user-b-normal-${Date.now()}` },
+    })
+    await waitFor(() => prompts.includes(targetContext.systemPrompt))
+
+    assert.equal(prompts.includes(targetContext.systemPrompt), true)
+
+    await (instance as any).handleMessage({
+      chatId: 'ctx-chat-id',
+      chatKey,
+      chatType: 'group',
+      userId: 'user-a',
+      content: '/ctx reset',
+      rawBody: { msgid: `ctx-reset-${Date.now()}` },
+    })
+    assert.equal(await ActiveContextRepository.findForChat(bot.id, chatKey), null)
+    await (instance as any).handleMessage({
+      chatId: 'ctx-chat-id',
+      chatKey,
+      chatType: 'group',
+      userId: 'user-b',
+      content: 'hello after reset',
+      rawBody: { msgid: `ctx-user-b-reset-${Date.now()}` },
+    })
+    await waitFor(() => prompts.includes(boundContext.systemPrompt))
+    assert.equal(prompts.includes(boundContext.systemPrompt), true)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance handles task status and result commands with owner permissions', async () => {
+  const bot = await makePersistedBot()
+  await WecomUserRepository.upsert({ botId: bot.id, wecomUserId: 'owner-user', role: 'user' })
+  await WecomUserRepository.upsert({ botId: bot.id, wecomUserId: 'other-user', role: 'user' })
+  const task = await GenerationTaskRepository.create({
+    botId: bot.id,
+    taskType: 'image',
+    ownerUserId: 'owner-user',
+    chatKey: 'chat-1',
+    chatId: 'chat-id',
+  })
+  const file = await GeneratedFileRepository.create({
+    taskId: task.id,
+    botId: bot.id,
+    ownerUserId: 'owner-user',
+    chatKey: 'chat-1',
+    fileType: 'image',
+    storagePath: '/tmp/result.png',
+    accessToken: 'task-result-token',
+  })
+  await GenerationTaskRepository.markSucceeded(task.id, [file.id])
+
+  const instance = makeInstanceForBot(bot, [])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = adapter
+    ;(instance as any).engine = {
+      invokeWithTools: async () => 'should not be called',
+    }
+
+    await (instance as any).handleMessage({
+      chatId: 'task-chat-id',
+      chatKey: 'wecom:user:task-owner',
+      chatType: 'single',
+      userId: 'owner-user',
+      content: `/task status ${task.id}`,
+      rawBody: { msgid: `task-status-${Date.now()}` },
+    })
+    await (instance as any).handleMessage({
+      chatId: 'task-chat-id',
+      chatKey: 'wecom:user:task-owner',
+      chatType: 'single',
+      userId: 'owner-user',
+      content: `/task result ${task.id}`,
+      rawBody: { msgid: `task-result-${Date.now()}` },
+    })
+    await (instance as any).handleMessage({
+      chatId: 'task-chat-id',
+      chatKey: 'wecom:user:task-other',
+      chatType: 'single',
+      userId: 'other-user',
+      content: `/task status ${task.id}`,
+      rawBody: { msgid: `task-denied-${Date.now()}` },
+    })
+
+    assert.equal(adapter.sent.some((item) => item.text.includes('状态：succeeded')), true)
+    assert.equal(adapter.sent.some((item) => item.text.includes('/api/generated-files/task-result-token')), true)
+    assert.equal(adapter.sent.some((item) => item.text.includes('没有查看该任务的权限')), true)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance validates image command model configuration and quota before creating tasks', async () => {
+  const noModelBot = await makePersistedBot()
+  await WecomUserRepository.upsert({ botId: noModelBot.id, wecomUserId: 'image-user', role: 'user' })
+  const noModelInstance = makeInstanceForBot(noModelBot, [])
+  const noModelAdapter = makeFakeAdapter()
+  try {
+    ;(noModelInstance as any).adapter = noModelAdapter
+    await (noModelInstance as any).handleMessage({
+      chatId: 'image-chat-id',
+      chatKey: 'wecom:user:image-no-model',
+      chatType: 'single',
+      userId: 'image-user',
+      content: '/image a launch poster',
+      rawBody: { msgid: `image-no-model-${Date.now()}` },
+    })
+    assert.equal(noModelAdapter.sent.some((item) => item.text.includes('未配置可用的图片生成模型')), true)
+  } finally {
+    ;(noModelInstance as any).sessions.destroy()
+  }
+
+  const quotaBot = await makePersistedBot()
+  await WecomUserRepository.upsert({ botId: quotaBot.id, wecomUserId: 'image-user', role: 'user' })
+  await ModelConfigRepository.create({
+    botId: quotaBot.id,
+    name: 'Quota model',
+    provider: 'openai-compatible-image',
+    modelName: 'gpt-image2',
+    capability: 'image_generation',
+    baseUrl: 'https://image.example.invalid/v1',
+    apiKey: 'key',
+    enabled: true,
+    quotaPerUserDaily: 0,
+  })
+  const quotaInstance = makeInstanceForBot(quotaBot, [])
+  const quotaAdapter = makeFakeAdapter()
+  try {
+    ;(quotaInstance as any).adapter = quotaAdapter
+    await (quotaInstance as any).handleMessage({
+      chatId: 'image-chat-id',
+      chatKey: 'wecom:user:image-quota',
+      chatType: 'single',
+      userId: 'image-user',
+      content: '/image a launch poster',
+      rawBody: { msgid: `image-quota-${Date.now()}` },
+    })
+    assert.equal(quotaAdapter.sent.some((item) => item.text.includes('额度已用完')), true)
+  } finally {
+    ;(quotaInstance as any).sessions.destroy()
   }
 })
 

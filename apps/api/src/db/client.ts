@@ -264,6 +264,138 @@ export async function initDb(): Promise<void> {
       updated_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS wecom_users (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
+      wecom_user_id TEXT NOT NULL,
+      display_name TEXT,
+      role TEXT NOT NULL DEFAULT 'user',
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(bot_id, wecom_user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS context_access_grants (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      context_id TEXT NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+      wecom_user_id TEXT NOT NULL,
+      access_level TEXT NOT NULL DEFAULT 'use',
+      granted_by TEXT,
+      expires_at INTEGER,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(bot_id, context_id, wecom_user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS active_contexts (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      chat_key TEXT NOT NULL,
+      wecom_user_id TEXT,
+      scope TEXT NOT NULL DEFAULT 'user_in_chat',
+      context_id TEXT NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+      activated_by TEXT NOT NULL,
+      expires_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS command_permissions (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
+      command_key TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'user',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      require_confirm INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS command_confirmations (
+      id TEXT PRIMARY KEY,
+      token TEXT NOT NULL UNIQUE,
+      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      chat_key TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      wecom_user_id TEXT NOT NULL,
+      command_key TEXT NOT NULL,
+      payload TEXT NOT NULL DEFAULT '{}',
+      expires_at INTEGER NOT NULL,
+      consumed_at INTEGER,
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
+      actor_user_id TEXT,
+      chat_key TEXT,
+      action TEXT NOT NULL,
+      target_type TEXT,
+      target_id TEXT,
+      result TEXT NOT NULL,
+      reason TEXT,
+      payload TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS model_configs (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      model_name TEXT NOT NULL,
+      capability TEXT NOT NULL,
+      base_url TEXT,
+      api_key TEXT,
+      default_params TEXT NOT NULL DEFAULT '{}',
+      enabled INTEGER NOT NULL DEFAULT 1,
+      timeout_ms INTEGER,
+      quota_per_user_daily INTEGER,
+      max_concurrent INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS generation_tasks (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      task_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      owner_user_id TEXT NOT NULL,
+      chat_key TEXT NOT NULL,
+      chat_id TEXT NOT NULL,
+      context_id TEXT,
+      model_id TEXT,
+      input_payload TEXT NOT NULL DEFAULT '{}',
+      output_file_ids TEXT NOT NULL DEFAULT '[]',
+      preview_summary TEXT,
+      error TEXT,
+      cost REAL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      started_at INTEGER,
+      finished_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS generated_files (
+      id TEXT PRIMARY KEY,
+      task_id TEXT REFERENCES generation_tasks(id) ON DELETE SET NULL,
+      bot_id TEXT REFERENCES bots(id) ON DELETE CASCADE,
+      owner_user_id TEXT,
+      chat_key TEXT,
+      file_type TEXT NOT NULL,
+      storage_path TEXT NOT NULL,
+      mime_type TEXT,
+      size_bytes INTEGER,
+      access_token TEXT NOT NULL UNIQUE,
+      expires_at INTEGER,
+      created_at INTEGER NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_namespace_created
       ON wiki_retrieval_logs(namespace, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_namespace_hit_count
@@ -284,6 +416,26 @@ export async function initDb(): Promise<void> {
       ON wiki_feedback_items(response_run_id);
     CREATE INDEX IF NOT EXISTS idx_annotation_answers_scope
       ON annotation_answers(namespace, context_id, enabled);
+    CREATE INDEX IF NOT EXISTS idx_wecom_users_identity
+      ON wecom_users(bot_id, wecom_user_id, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_wecom_users_identity_unique
+      ON wecom_users(COALESCE(bot_id, ''), wecom_user_id);
+    CREATE INDEX IF NOT EXISTS idx_context_access_user
+      ON context_access_grants(bot_id, wecom_user_id, status);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_active_context_user_scope
+      ON active_contexts(bot_id, chat_key, scope, COALESCE(wecom_user_id, ''));
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_command_permissions_unique
+      ON command_permissions(COALESCE(bot_id, ''), command_key, role);
+    CREATE INDEX IF NOT EXISTS idx_command_confirmations_token
+      ON command_confirmations(token, expires_at, consumed_at);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_action_created
+      ON audit_logs(action, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_model_configs_capability
+      ON model_configs(bot_id, capability, enabled);
+    CREATE INDEX IF NOT EXISTS idx_generation_tasks_owner
+      ON generation_tasks(bot_id, owner_user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_generated_files_token
+      ON generated_files(access_token, expires_at);
 
     UPDATE bots SET status = 'stopped' WHERE status = 'running';
   `)
@@ -304,6 +456,7 @@ export async function initDb(): Promise<void> {
   await addColumnIfMissing('wiki_knowledge_drafts', 'merge_strategy', "TEXT NOT NULL DEFAULT 'append'")
   await addColumnIfMissing('session_messages', 'response_run_id', 'TEXT')
   await addColumnIfMissing('wiki_retrieval_logs', 'response_run_id', 'TEXT')
+  await addColumnIfMissing('generation_tasks', 'preview_summary', 'TEXT')
   await db.execute('CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_response_run ON wiki_retrieval_logs(response_run_id)')
   await seedDefaultSessionTtlSetting()
   await migrateAllowedProjects()
