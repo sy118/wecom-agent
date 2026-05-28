@@ -19,6 +19,8 @@ import { createScheduledTasksRouter } from './routes/scheduled-tasks.js'
 import { wikiRouter } from './routes/wiki.js'
 import { wecomEventsRouter } from './routes/wecom-events.js'
 import { settingsRouter } from './routes/settings.js'
+import { wecomCommandConfigRouter } from './routes/wecom-command-config.js'
+import { generatedFilesRouter } from './routes/generated-files.js'
 import type { BotConfig } from '@wecom-platform/types'
 
 const PORT = Number(process.env.API_PORT ?? 3000)
@@ -46,10 +48,12 @@ async function main(): Promise<void> {
   app.use(express.json())
 
   app.use('/api/auth', authRouter)
+  app.use('/api/generated-files', generatedFilesRouter)
 
   app.use('/api/bots', authMiddleware, botsRouter)
   app.use('/api/bots/:botId/contexts', authMiddleware, contextsRouter)
   app.use('/api/bots/:botId/bindings', authMiddleware, bindingsRouter)
+  app.use('/api/bots/:botId/wecom-command-config', authMiddleware, wecomCommandConfigRouter)
   app.use('/api/bots/:botId/scheduled-tasks', authMiddleware, createScheduledTasksRouter(taskScheduler))
   app.use('/api/mcp-servers', authMiddleware, mcpServersRouter)
   app.use('/api/skills', authMiddleware, skillsRouter)

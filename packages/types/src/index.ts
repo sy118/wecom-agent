@@ -318,6 +318,154 @@ export interface LlmConfig {
   provider: BotProvider
 }
 
+// WeCom Command / Access Control ---------------------------------------------
+
+export type WecomUserStatus = 'active' | 'disabled'
+export type WecomUserRole = 'user' | 'manager' | 'admin'
+
+export interface WecomUserIdentity {
+  id: string
+  botId: string | null
+  wecomUserId: string
+  displayName: string | null
+  role: WecomUserRole
+  status: WecomUserStatus
+  createdAt: number
+  updatedAt: number
+}
+
+export type ContextAccessLevel = 'use' | 'manage'
+
+export interface ContextAccessGrant {
+  id: string
+  botId: string
+  contextId: string
+  wecomUserId: string
+  accessLevel: ContextAccessLevel
+  grantedBy: string | null
+  expiresAt: number | null
+  status: 'active' | 'revoked'
+  createdAt: number
+  updatedAt: number
+}
+
+export type ActiveContextScope = 'user_in_chat' | 'chat'
+export type ActiveContextSource = 'runtime' | 'binding' | 'default'
+
+export interface ActiveContext {
+  id: string
+  botId: string
+  chatKey: string
+  wecomUserId: string | null
+  scope: ActiveContextScope
+  contextId: string
+  activatedBy: string
+  expiresAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface CommandPermission {
+  id: string
+  botId: string | null
+  commandKey: string
+  role: WecomUserRole
+  enabled: boolean
+  requireConfirm: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export interface CommandConfirmation {
+  id: string
+  token: string
+  botId: string
+  chatKey: string
+  chatId: string
+  wecomUserId: string
+  commandKey: string
+  payload: Record<string, any>
+  expiresAt: number
+  consumedAt: number | null
+  createdAt: number
+}
+
+export type AuditResult = 'success' | 'failure' | 'denied'
+
+export interface AuditLogRecord {
+  id: string
+  botId: string | null
+  actorUserId: string | null
+  chatKey: string | null
+  action: string
+  targetType: string | null
+  targetId: string | null
+  result: AuditResult
+  reason: string | null
+  payload: Record<string, any>
+  createdAt: number
+}
+
+// Generation Tasks / Files ----------------------------------------------------
+
+export type ModelCapability = 'text' | 'vision' | 'image_generation' | 'file_generation'
+export type GenerationTaskType = 'image' | 'ppt' | 'document' | 'spreadsheet' | 'archive'
+export type GenerationTaskStatus = 'pending' | 'running' | 'succeeded' | 'failed'
+
+export interface ModelConfig {
+  id: string
+  botId: string | null
+  name: string
+  provider: BotProvider | 'openai-compatible-image'
+  modelName: string
+  capability: ModelCapability
+  baseUrl: string | null
+  apiKey: string | null
+  defaultParams: Record<string, any>
+  enabled: boolean
+  timeoutMs: number | null
+  quotaPerUserDaily: number | null
+  maxConcurrent: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface GeneratedFile {
+  id: string
+  taskId: string | null
+  botId: string | null
+  ownerUserId: string | null
+  chatKey: string | null
+  fileType: string
+  storagePath: string
+  mimeType: string | null
+  sizeBytes: number | null
+  accessToken: string
+  expiresAt: number | null
+  createdAt: number
+}
+
+export interface GenerationTask {
+  id: string
+  botId: string
+  taskType: GenerationTaskType
+  status: GenerationTaskStatus
+  ownerUserId: string
+  chatKey: string
+  chatId: string
+  contextId: string | null
+  modelId: string | null
+  inputPayload: Record<string, any>
+  outputFileIds: string[]
+  previewSummary: string | null
+  error: string | null
+  cost: number | null
+  createdAt: number
+  updatedAt: number
+  startedAt: number | null
+  finishedAt: number | null
+}
+
 // ─── Scheduled Task ───────────────────────────────────────────────────────────
 
 export interface ScheduledTask {

@@ -29,8 +29,12 @@ export class SessionStore {
   async getOrCreate(chatKey: string, contextId: string, ttlMin: number): Promise<Session> {
     const now = Date.now()
     const result = await this.db.execute({
-      sql: 'SELECT id, context_id, dify_conversation_id, last_active_at, expires_at FROM sessions WHERE bot_id = ? AND chat_key = ? AND expires_at > ?',
-      args: [this.botId, chatKey, now],
+      sql: `SELECT id, context_id, dify_conversation_id, last_active_at, expires_at
+            FROM sessions
+            WHERE bot_id = ? AND chat_key = ? AND context_id = ? AND expires_at > ?
+            ORDER BY last_active_at DESC
+            LIMIT 1`,
+      args: [this.botId, chatKey, contextId, now],
     })
 
     if (result.rows.length > 0) {
@@ -80,7 +84,10 @@ export class SessionStore {
   async addMessage(chatKey: string, message: SessionMessage, responseRunId?: string | null): Promise<void> {
     const now = Date.now()
     const sessionResult = await this.db.execute({
-      sql: 'SELECT id FROM sessions WHERE bot_id = ? AND chat_key = ? AND expires_at > ?',
+      sql: `SELECT id FROM sessions
+            WHERE bot_id = ? AND chat_key = ? AND expires_at > ?
+            ORDER BY last_active_at DESC
+            LIMIT 1`,
       args: [this.botId, chatKey, now],
     })
     if (sessionResult.rows.length === 0) return
@@ -114,7 +121,13 @@ export class SessionStore {
 
   async setDifyConversationId(chatKey: string, conversationId: string): Promise<void> {
     await this.db.execute({
-      sql: 'UPDATE sessions SET dify_conversation_id = ? WHERE bot_id = ? AND chat_key = ? AND expires_at > ?',
+      sql: `UPDATE sessions SET dify_conversation_id = ?
+            WHERE id = (
+              SELECT id FROM sessions
+              WHERE bot_id = ? AND chat_key = ? AND expires_at > ?
+              ORDER BY last_active_at DESC
+              LIMIT 1
+            )`,
       args: [conversationId, this.botId, chatKey, Date.now()],
     })
   }
@@ -129,7 +142,10 @@ export class SessionStore {
   async getAll(): Promise<Session[]> {
     const now = Date.now()
     const sessionResult = await this.db.execute({
-      sql: 'SELECT id, chat_key, context_id, dify_conversation_id, last_active_at, expires_at FROM sessions WHERE bot_id = ? AND expires_at > ?',
+      sql: `SELECT id, chat_key, context_id, dify_conversation_id, last_active_at, expires_at
+            FROM sessions
+            WHERE bot_id = ? AND expires_at > ?
+            ORDER BY last_active_at DESC`,
       args: [this.botId, now],
     })
 

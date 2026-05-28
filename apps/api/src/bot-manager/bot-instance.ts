@@ -8,7 +8,16 @@ import { SkillAuditRepository } from '../db/skill-audit-repository.js'
 import { WikiRetrievalLogRepository } from '../db/wiki-retrieval-log-repository.js'
 import { BotResponseRunRepository } from '../db/bot-response-run-repository.js'
 import { AnnotationAnswerRepository } from '../db/annotation-answer-repository.js'
+import { ActiveContextRepository, ContextAccessRepository } from '../db/wecom-access-repository.js'
+import { ModelConfigRepository } from '../db/generation-repository.js'
 import { handleIncomingWecomEvent } from '../services/wecom-event-service.js'
+import { createGenerationTask, formatGenerationTaskResult, formatGenerationTaskStatus, getGenerationTaskForUser, listGeneratedFilesForTask } from '../services/generation-task-service.js'
+import { assertImageGenerationCapacity, ensureImageGenerationProcessorRegistered } from '../services/image-generation-service.js'
+import { generationTaskRunner } from '../services/generation-task-runner.js'
+import { parseWecomCommand } from '../commands/wecom-command-parser.js'
+import { WecomCommandExecutor } from '../commands/wecom-command-executor.js'
+import type { WecomCommandActor, WecomCommandHandlerResult, WecomCommandRuntime } from '../commands/wecom-command-executor.js'
+import type { ParsedWecomCommand } from '../commands/wecom-command-parser.js'
 import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, IncomingEvent, Session, SessionMessage, BotResponseRun } from '@wecom-platform/types'
 
 const QUEUE_BACKPRESSURE_LIMIT = 10
@@ -114,6 +123,13 @@ export interface DiscoveredChat {
   firstSeenAt: number
 }
 
+type EffectiveContextSource = 'runtime' | 'binding' | 'default'
+
+interface EffectiveContext {
+  context: ContextConfig
+  source: EffectiveContextSource
+}
+
 export class BotInstance {
   private adapter: WecomAdapter
   private engine: AgentEngine | null = null
@@ -128,6 +144,7 @@ export class BotInstance {
   private bindingMap: Map<string, string>
   private defaultContext: ContextConfig | null
   private discoveredChats = new Map<string, DiscoveredChat>()
+  private commandExecutor: WecomCommandExecutor
 
   constructor(private deps: BotInstanceDeps) {
     this.adapter = new WecomAdapter({
@@ -141,6 +158,327 @@ export class BotInstance {
     this.bindingMap = new Map(deps.bindings.map((b) => [b.chatKey, b.contextId]))
     this.defaultContext = deps.contexts.find((c) => c.isDefault) ?? null
     this.skillToolPool = new Map(deps.skills.filter((skill) => skill.enabled).map((skill) => [skill.id, skill]))
+    this.commandExecutor = new WecomCommandExecutor({
+      handle: (command, runtime, actor) => this.handleRuntimeCommand(command, runtime, actor),
+    })
+  }
+
+  private async handleRuntimeCommand(
+    command: ParsedWecomCommand,
+    runtime: WecomCommandRuntime,
+    actor: WecomCommandActor
+  ): Promise<WecomCommandHandlerResult | null> {
+    return (await this.handleContextCommand(command, runtime, actor))
+      ?? (await this.handleTaskCommand(command, runtime, actor))
+      ?? this.handleImageCommand(command, runtime, actor)
+  }
+
+  private isGroupChat(chatKey: string): boolean {
+    return chatKey.startsWith('wecom:group:')
+  }
+
+  private async resolveEffectiveContext(chatKey: string, userId: string): Promise<EffectiveContext | null> {
+    const groupChat = this.isGroupChat(chatKey)
+    const active = groupChat
+      ? await ActiveContextRepository.findForChat(this.deps.bot.id, chatKey)
+      : await ActiveContextRepository.findForUser(this.deps.bot.id, chatKey, userId)
+    if (active) {
+      const activeContext = this.contextMap.get(active.contextId)
+      if (activeContext && groupChat && active.scope === 'chat') {
+        return { context: activeContext, source: 'runtime' }
+      }
+      if (activeContext && await ContextAccessRepository.hasAccess(this.deps.bot.id, userId, active.contextId)) {
+        return { context: activeContext, source: 'runtime' }
+      }
+      if (active.scope === 'user_in_chat' && active.wecomUserId === userId) {
+        await ActiveContextRepository.clear(this.deps.bot.id, chatKey, userId)
+      } else if (active.scope === 'chat') {
+        await ActiveContextRepository.clearChat(this.deps.bot.id, chatKey)
+      }
+    }
+
+    const boundContextId = this.bindingMap.get(chatKey)
+    const boundContext = boundContextId ? this.contextMap.get(boundContextId) : null
+    if (boundContext) return { context: boundContext, source: 'binding' }
+    if (this.defaultContext) return { context: this.defaultContext, source: 'default' }
+    return null
+  }
+
+  private async handleContextCommand(
+    command: ParsedWecomCommand,
+    runtime: WecomCommandRuntime,
+    actor: WecomCommandActor
+  ): Promise<WecomCommandHandlerResult | null> {
+    if (!command.commandKey.startsWith('ctx.')) return null
+
+    if (command.commandKey === 'ctx.current') {
+      const resolved = await this.resolveEffectiveContext(runtime.chatKey, runtime.userId)
+      if (!resolved) {
+        return {
+          commandKey: command.commandKey,
+          ok: false,
+          status: 'not_found',
+          message: '当前会话暂未配置可用上下文。',
+          auditReason: 'context_not_found',
+        }
+      }
+      return {
+        commandKey: command.commandKey,
+        ok: true,
+        status: 'success',
+        message: `当前上下文：${resolved.context.name} (${resolved.context.id})\n来源：${this.formatContextSource(resolved.source)}`,
+        auditPayload: { contextId: resolved.context.id, source: resolved.source },
+      }
+    }
+
+    if (!actor.mapped) {
+      return {
+        commandKey: command.commandKey,
+        ok: false,
+        status: 'permission_denied',
+        message: '你的企微用户尚未登记，无法执行该上下文命令。',
+        auditReason: 'wecom_user_unmapped',
+      }
+    }
+
+    if (command.commandKey === 'ctx.list') {
+      const contexts = actor.role === 'admin'
+        ? [...this.contextMap.values()].filter((context) => context.botId === this.deps.bot.id)
+        : (await ContextAccessRepository.listByUser(this.deps.bot.id, runtime.userId))
+            .map((grant) => this.contextMap.get(grant.contextId))
+            .filter((context): context is ContextConfig => Boolean(context))
+
+      if (contexts.length === 0) {
+        return {
+          commandKey: command.commandKey,
+          ok: true,
+          status: 'success',
+          message: '当前没有可切换的上下文。',
+          auditPayload: { count: 0 },
+        }
+      }
+      return {
+        commandKey: command.commandKey,
+        ok: true,
+        status: 'success',
+        message: ['可切换上下文：', ...contexts.map((context) => `- ${context.name} (${context.id})`)].join('\n'),
+        auditPayload: { count: contexts.length },
+      }
+    }
+
+    if (command.commandKey === 'ctx.use') {
+      const requested = command.args[0]
+      const target = this.findContextByIdOrName(requested)
+      if (!target || !await ContextAccessRepository.hasAccess(this.deps.bot.id, runtime.userId, target.id)) {
+        return {
+          commandKey: command.commandKey,
+          ok: false,
+          status: 'permission_denied',
+          message: '未找到可访问的目标上下文，或你没有切换权限。',
+          auditReason: 'context_access_denied',
+          auditPayload: { requested },
+        }
+      }
+
+      const scope = this.isGroupChat(runtime.chatKey) ? 'chat' : 'user_in_chat'
+      await ActiveContextRepository.set({
+        botId: this.deps.bot.id,
+        chatKey: runtime.chatKey,
+        wecomUserId: scope === 'chat' ? null : runtime.userId,
+        scope,
+        contextId: target.id,
+        activatedBy: runtime.userId,
+      })
+      await this.sessions.delete(runtime.chatKey)
+      return {
+        commandKey: command.commandKey,
+        ok: true,
+        status: 'success',
+        message: `${scope === 'chat' ? '已切换本群上下文' : '已切换到上下文'}：${target.name} (${target.id})\n下一条消息将立即使用该上下文。`,
+        auditPayload: { contextId: target.id, scope },
+      }
+    }
+
+    if (command.commandKey === 'ctx.reset') {
+      const groupChat = this.isGroupChat(runtime.chatKey)
+      const active = groupChat
+        ? await ActiveContextRepository.findForChat(this.deps.bot.id, runtime.chatKey)
+        : await ActiveContextRepository.findForUser(this.deps.bot.id, runtime.chatKey, runtime.userId)
+      if (!active) {
+        return {
+          commandKey: command.commandKey,
+          ok: true,
+          status: 'success',
+          message: '当前没有运行时切换的上下文，无需重置。',
+        }
+      }
+
+      if (groupChat) {
+        await ActiveContextRepository.clearChat(this.deps.bot.id, runtime.chatKey)
+      } else {
+        await ActiveContextRepository.clear(this.deps.bot.id, runtime.chatKey, runtime.userId)
+      }
+      await this.sessions.delete(runtime.chatKey)
+      const fallback = await this.resolveEffectiveContext(runtime.chatKey, runtime.userId)
+      return {
+        commandKey: command.commandKey,
+        ok: true,
+        status: 'success',
+        message: fallback
+          ? `已重置${groupChat ? '本群' : '运行时'}上下文。\n当前上下文：${fallback.context.name} (${fallback.context.id})\n来源：${this.formatContextSource(fallback.source)}`
+          : `已重置${groupChat ? '本群' : '运行时'}上下文。当前会话暂无可用上下文。`,
+        auditPayload: { previousContextId: active.contextId, fallbackContextId: fallback?.context.id ?? null },
+      }
+    }
+
+    return null
+  }
+
+  private findContextByIdOrName(value: string): ContextConfig | null {
+    const normalized = value.trim().toLowerCase()
+    if (!normalized) return null
+    return [...this.contextMap.values()].find((context) =>
+      context.botId === this.deps.bot.id &&
+      (context.id.toLowerCase() === normalized || context.name.toLowerCase() === normalized)
+    ) ?? null
+  }
+
+  private formatContextSource(source: EffectiveContextSource): string {
+    if (source === 'runtime') return '运行时切换'
+    if (source === 'binding') return '后台绑定'
+    return '默认上下文'
+  }
+
+  private async handleTaskCommand(
+    command: ParsedWecomCommand,
+    runtime: WecomCommandRuntime,
+    actor: WecomCommandActor
+  ): Promise<WecomCommandHandlerResult | null> {
+    if (command.commandKey !== 'task.status' && command.commandKey !== 'task.result') return null
+    if (!actor.mapped) {
+      return {
+        commandKey: command.commandKey,
+        ok: false,
+        status: 'permission_denied',
+        message: '你的企微用户尚未登记，无法查询生成任务。',
+        auditReason: 'wecom_user_unmapped',
+      }
+    }
+
+    const taskId = command.args[0]
+    const access = await getGenerationTaskForUser(this.deps.bot.id, taskId, runtime.userId, actor.role)
+    if (access.error === 'not_found') {
+      return {
+        commandKey: command.commandKey,
+        ok: false,
+        status: 'not_found',
+        message: '未找到该任务，或任务不属于当前机器人。',
+        auditReason: 'task_not_found',
+        auditPayload: { taskId },
+      }
+    }
+    if (access.error === 'denied' || !access.task) {
+      return {
+        commandKey: command.commandKey,
+        ok: false,
+        status: 'permission_denied',
+        message: '你没有查看该任务的权限。',
+        auditReason: 'task_access_denied',
+        auditPayload: { taskId },
+      }
+    }
+
+    if (command.commandKey === 'task.status') {
+      return {
+        commandKey: command.commandKey,
+        ok: true,
+        status: 'success',
+        message: formatGenerationTaskStatus(access.task),
+        auditPayload: { taskId },
+      }
+    }
+
+    const files = await listGeneratedFilesForTask(access.task)
+    return {
+      commandKey: command.commandKey,
+      ok: true,
+      status: 'success',
+      message: formatGenerationTaskResult(access.task, files, process.env.PUBLIC_BASE_URL),
+      auditPayload: { taskId, fileCount: files.length },
+    }
+  }
+
+  private async handleImageCommand(
+    command: ParsedWecomCommand,
+    runtime: WecomCommandRuntime,
+    actor: WecomCommandActor
+  ): Promise<WecomCommandHandlerResult | null> {
+    if (command.commandKey !== 'image.generate') return null
+    if (!actor.mapped) {
+      return {
+        commandKey: command.commandKey,
+        ok: false,
+        status: 'permission_denied',
+        message: '你的企微用户尚未登记，无法创建图片生成任务。',
+        auditReason: 'wecom_user_unmapped',
+      }
+    }
+
+    const model = await ModelConfigRepository.findEnabledByCapability(this.deps.bot.id, 'image_generation')
+    if (!model) {
+      return {
+        commandKey: command.commandKey,
+        ok: false,
+        status: 'not_found',
+        message: '当前机器人未配置可用的图片生成模型。',
+        auditReason: 'image_model_not_configured',
+      }
+    }
+    const prompt = command.args.join(' ').trim()
+    const capacityError = await assertImageGenerationCapacity(
+      this.deps.bot.id,
+      runtime.userId,
+      model.id,
+      model.quotaPerUserDaily,
+      model.maxConcurrent
+    )
+    if (capacityError) {
+      return {
+        commandKey: command.commandKey,
+        ok: false,
+        status: 'permission_denied',
+        message: capacityError,
+        auditReason: 'image_capacity_limited',
+        auditPayload: { modelId: model.id },
+      }
+    }
+
+    const resolved = await this.resolveEffectiveContext(runtime.chatKey, runtime.userId)
+    const task = await createGenerationTask({
+      botId: this.deps.bot.id,
+      taskType: 'image',
+      ownerUserId: runtime.userId,
+      chatKey: runtime.chatKey,
+      chatId: runtime.chatId,
+      contextId: resolved?.context.id ?? null,
+      modelId: model.id,
+      inputPayload: { prompt, params: model.defaultParams },
+      previewSummary: prompt.slice(0, 120),
+    })
+    ensureImageGenerationProcessorRegistered()
+    generationTaskRunner.enqueue(task.id)
+    return {
+      commandKey: command.commandKey,
+      ok: true,
+      status: 'success',
+      message: [
+        '已创建图片生成任务。',
+        `任务 ID：${task.id}`,
+        `查询状态：/task status ${task.id}`,
+        `获取结果：/task result ${task.id}`,
+      ].join('\n'),
+      auditPayload: { taskId: task.id, modelId: model.id },
+    }
   }
 
   async start(): Promise<void> {
@@ -345,8 +683,20 @@ export class BotInstance {
       return
     }
 
-    const contextId = this.bindingMap.get(chatKey)
-    const context = contextId ? this.contextMap.get(contextId) : this.defaultContext
+    const command = parseWecomCommand(msg.content)
+    if (command) {
+      const result = await this.commandExecutor.execute(command, {
+        botId: this.deps.bot.id,
+        chatKey,
+        chatId,
+        userId: msg.userId,
+      })
+      await this.adapter.sendMessage(chatId, result.message).catch(() => {})
+      return
+    }
+
+    const resolvedContext = await this.resolveEffectiveContext(chatKey, msg.userId)
+    const context = resolvedContext?.context ?? null
     if (!context) {
       if (!this.discoveredChats.has(chatKey)) {
         const chatType = chatKey.startsWith('wecom:group:') ? 'group' : 'user'

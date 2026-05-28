@@ -36,6 +36,34 @@ export const bindingsApi = {
   delete: (botId: string, id: string) => api.delete(`/bots/${botId}/bindings/${id}`),
 }
 
+export const wecomCommandConfigApi = {
+  users: (botId: string) => api.get(`/bots/${botId}/wecom-command-config/users`).then((r) => r.data),
+  saveUser: (botId: string, data: unknown) => api.post(`/bots/${botId}/wecom-command-config/users`, data).then((r) => r.data),
+  updateUser: (botId: string, wecomUserId: string, data: unknown) =>
+    api.patch(`/bots/${botId}/wecom-command-config/users/${encodeURIComponent(wecomUserId)}`, data).then((r) => r.data),
+  deleteUser: (botId: string, wecomUserId: string) =>
+    api.delete(`/bots/${botId}/wecom-command-config/users/${encodeURIComponent(wecomUserId)}`),
+  contextAccess: (botId: string, wecomUserId?: string) =>
+    api.get(`/bots/${botId}/wecom-command-config/context-access`, { params: wecomUserId ? { wecomUserId } : {} }).then((r) => r.data),
+  grantContext: (botId: string, data: unknown) =>
+    api.post(`/bots/${botId}/wecom-command-config/context-access`, data).then((r) => r.data),
+  deleteContextAccess: (botId: string, wecomUserId: string, contextId: string) =>
+    api.delete(`/bots/${botId}/wecom-command-config/context-access/${encodeURIComponent(wecomUserId)}/${encodeURIComponent(contextId)}`),
+  commandPermissions: (botId: string) => api.get(`/bots/${botId}/wecom-command-config/command-permissions`).then((r) => r.data),
+  setCommandPermission: (botId: string, data: unknown) =>
+    api.put(`/bots/${botId}/wecom-command-config/command-permissions`, data).then((r) => r.data),
+  featureSwitches: (botId: string) => api.get(`/bots/${botId}/wecom-command-config/feature-switches`).then((r) => r.data),
+  updateFeatureSwitches: (botId: string, data: unknown) =>
+    api.put(`/bots/${botId}/wecom-command-config/feature-switches`, data).then((r) => r.data),
+  auditLogs: (botId: string) => api.get(`/bots/${botId}/wecom-command-config/audit-logs`).then((r) => r.data),
+  modelConfigs: (botId: string, capability?: string) =>
+    api.get(`/bots/${botId}/wecom-command-config/model-configs`, { params: capability ? { capability } : {} }).then((r) => r.data),
+  createModelConfig: (botId: string, data: unknown) =>
+    api.post(`/bots/${botId}/wecom-command-config/model-configs`, data).then((r) => r.data),
+  updateModelConfig: (botId: string, id: string, data: unknown) =>
+    api.patch(`/bots/${botId}/wecom-command-config/model-configs/${id}`, data).then((r) => r.data),
+}
+
 export const mcpServersApi = {
   list: () => api.get('/mcp-servers').then((r) => r.data),
   create: (data: unknown) => api.post('/mcp-servers', data).then((r) => r.data),
