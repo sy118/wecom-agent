@@ -591,8 +591,11 @@ test('BotInstance sends menu cards for help and enter-chat events', async () => 
     })
     assert.equal(adapter.cards.some((item) => item.card.card_type === 'button_interaction'), true)
     assert.equal(adapter.cards.some((item) => item.card.button_list?.some((button: any) => button.key === 'menu_ctx_list')), true)
+    assert.equal(adapter.cards[0].card.button_list.length, 4)
+    assert.equal(adapter.cards.some((item) => item.card.button_list?.some((button: any) => button.key === 'menu_help')), true)
     assert.equal(adapter.cards.some((item) => item.card.button_list?.some((button: any) => button.key === 'menu_image_help')), false)
     assert.equal(adapter.cards.some((item) => item.card.horizontal_content_list?.some((row: any) => row.value === '/image 描述')), true)
+    assert.equal(adapter.sent.length, 0)
 
     await (instance as any).handleEvent({
       msgId: `enter-menu-${Date.now()}`,
@@ -893,6 +896,7 @@ test('BotInstance validates image command model configuration and quota before c
     })
     assert.equal(successAdapter.cards.some((item) => item.card.task_id?.startsWith('gen_task_')), true)
     assert.equal(successAdapter.cards.some((item) => item.card.button_list?.some((button: any) => button.key === 'task_result')), true)
+    assert.equal(successAdapter.sent.length, 0)
   } finally {
     ;(generationTaskRunner as any).enqueue = originalEnqueue
     ;(successInstance as any).sessions.destroy()

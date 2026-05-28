@@ -139,6 +139,7 @@ const MENU_CARD_TASK_PREFIX = 'menu_'
 const MENU_EVENT_CURRENT = 'menu_ctx_current'
 const MENU_EVENT_LIST = 'menu_ctx_list'
 const MENU_EVENT_RESET = 'menu_ctx_reset'
+const MENU_EVENT_HELP = 'menu_help'
 const TASK_CARD_TASK_PREFIX = 'gen_task_'
 const TASK_EVENT_STATUS = 'task_status'
 const TASK_EVENT_RESULT = 'task_result'
@@ -448,6 +449,7 @@ export class BotInstance {
         button_list: [
           { text: '当前上下文', style: 1, key: MENU_EVENT_CURRENT },
           { text: '切换上下文', style: 1, key: MENU_EVENT_LIST },
+          { text: '使用说明', style: 1, key: MENU_EVENT_HELP },
           { text: '重置上下文', style: 2, key: MENU_EVENT_RESET },
         ],
         task_id: `${MENU_CARD_TASK_PREFIX}${randomUUID()}`,
@@ -643,11 +645,7 @@ export class BotInstance {
       ok: true,
       status: 'success',
       message: cardSent
-        ? [
-            '已创建图片生成任务，并发送了任务卡片。',
-            `任务 ID：${task.id}`,
-            '任务完成后会自动推送结果到当前企微会话。',
-          ].join('\n')
+        ? ''
         : [
             '已创建图片生成任务。',
             `任务 ID：${task.id}`,
@@ -1066,6 +1064,7 @@ export class BotInstance {
     if (taskId.startsWith(MENU_CARD_TASK_PREFIX)) {
       if (eventKey === MENU_EVENT_CURRENT) return this.createEventCommand('ctx.current', [])
       if (eventKey === MENU_EVENT_LIST) return this.createEventCommand('ctx.list', [])
+      if (eventKey === MENU_EVENT_HELP) return this.createEventCommand('help', [])
       if (eventKey === MENU_EVENT_RESET) return this.createEventCommand('ctx.reset', [])
     }
     if (taskId.startsWith(TASK_CARD_TASK_PREFIX)) {
@@ -1120,9 +1119,9 @@ export class BotInstance {
       const runtime = this.runtimeFromMessage(msg)
       const result = await this.commandExecutor.execute(command, runtime)
       if (command.commandKey === 'help' && result.ok && await this.sendCommandMenuCard(runtime)) {
-        await this.adapter.sendMessage(chatId, `已发送操作菜单卡片。\n\n${result.message}`).catch(() => {})
+        return
       } else {
-        await this.adapter.sendMessage(chatId, result.message).catch(() => {})
+        if (result.message.trim()) await this.adapter.sendMessage(chatId, result.message).catch(() => {})
       }
       return
     }
