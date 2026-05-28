@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from 'express'
 import { createDecipheriv, createHash } from 'crypto'
 import { BotRepository } from '../db/bot-repository.js'
 import { ContextRepository } from '../db/context-repository.js'
+import { botManager } from '../bot-manager/bot-manager.js'
 import { handleIncomingWecomEvent, parseIncomingEventPayload } from '../services/wecom-event-service.js'
 
 export const wecomEventsRouter: Router = Router()
@@ -120,7 +121,10 @@ async function handlePost(req: Request, res: Response): Promise<void> {
     const event = parseIncomingEventPayload(payload)
     if (!event) { res.status(400).json({ error: 'invalid wecom event payload' }); return }
     const contexts = bot ? await ContextRepository.findByBotId(bot.id) : undefined
-    await handleIncomingWecomEvent(event, { botId: bot?.id ?? null, contexts })
+    const handledByRuntime = bot ? await botManager.handleWecomEvent(bot.id, event) : false
+    if (!handledByRuntime) {
+      await handleIncomingWecomEvent(event, { botId: bot?.id ?? null, contexts })
+    }
     res.status(200).json({})
   } catch (err: any) {
     res.status(err.statusCode ?? 500).json({ error: err instanceof Error ? err.message : String(err) })

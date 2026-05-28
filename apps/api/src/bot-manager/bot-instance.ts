@@ -133,6 +133,14 @@ interface EffectiveContext {
 const CONTEXT_CARD_EVENT_KEY = 'ctx_use_submit'
 const CONTEXT_CARD_QUESTION_KEY = 'ctx_id'
 const CONTEXT_CARD_TASK_PREFIX = 'ctx_use_'
+const MENU_CARD_TASK_PREFIX = 'menu_'
+const MENU_EVENT_CURRENT = 'menu_ctx_current'
+const MENU_EVENT_LIST = 'menu_ctx_list'
+const MENU_EVENT_RESET = 'menu_ctx_reset'
+const MENU_EVENT_IMAGE_HELP = 'menu_image_help'
+const TASK_CARD_TASK_PREFIX = 'gen_task_'
+const TASK_EVENT_STATUS = 'task_status'
+const TASK_EVENT_RESULT = 'task_result'
 const WECOM_SELECT_OPTION_LIMIT = 10
 
 export class BotInstance {
@@ -176,6 +184,24 @@ export class BotInstance {
     return (await this.handleContextCommand(command, runtime, actor))
       ?? (await this.handleTaskCommand(command, runtime, actor))
       ?? this.handleImageCommand(command, runtime, actor)
+  }
+
+  private runtimeFromMessage(msg: IncomingMessage): WecomCommandRuntime {
+    return {
+      botId: this.deps.bot.id,
+      chatKey: msg.chatKey,
+      chatId: msg.chatId,
+      userId: msg.userId,
+    }
+  }
+
+  private runtimeFromEvent(event: IncomingEvent): WecomCommandRuntime {
+    return {
+      botId: this.deps.bot.id,
+      chatKey: event.chatKey,
+      chatId: event.chatId ?? event.userId,
+      userId: event.userId,
+    }
   }
 
   private isGroupChat(chatKey: string): boolean {
@@ -393,6 +419,58 @@ export class BotInstance {
     }
   }
 
+  private async sendCommandMenuCard(runtime: WecomCommandRuntime): Promise<boolean> {
+    if (!this.adapter.sendTemplateCard) return false
+    try {
+      await this.adapter.sendTemplateCard(runtime.chatId, {
+        card_type: 'button_interaction',
+        source: { desc: '企微助手' },
+        main_title: {
+          title: '操作菜单',
+          desc: this.isGroupChat(runtime.chatKey) ? '群聊上下文切换会对本群生效' : '选择一个操作继续',
+        },
+        sub_title_text: '图片生成仍需发送文字描述，例如：/image 一张发布会海报',
+        button_list: [
+          { text: '当前上下文', style: 1, key: MENU_EVENT_CURRENT },
+          { text: '切换上下文', style: 1, key: MENU_EVENT_LIST },
+          { text: '重置上下文', style: 2, key: MENU_EVENT_RESET },
+          { text: '图片生成', style: 1, key: MENU_EVENT_IMAGE_HELP },
+        ],
+        task_id: `${MENU_CARD_TASK_PREFIX}${randomUUID()}`,
+      })
+      return true
+    } catch (err) {
+      console.error(`[BotInstance:${this.deps.bot.id}] Failed to send command menu card:`, err)
+      return false
+    }
+  }
+
+  private async sendTaskActionCard(runtime: WecomCommandRuntime, taskId: string): Promise<boolean> {
+    if (!this.adapter.sendTemplateCard) return false
+    try {
+      await this.adapter.sendTemplateCard(runtime.chatId, {
+        card_type: 'button_interaction',
+        source: { desc: '生成任务' },
+        main_title: {
+          title: '图片生成任务已创建',
+          desc: '完成后会自动推送结果，也可以点按钮查询',
+        },
+        horizontal_content_list: [
+          { keyname: '任务ID', value: taskId },
+        ],
+        button_list: [
+          { text: '查状态', style: 1, key: TASK_EVENT_STATUS },
+          { text: '取结果', style: 1, key: TASK_EVENT_RESULT },
+        ],
+        task_id: `${TASK_CARD_TASK_PREFIX}${taskId}`,
+      })
+      return true
+    } catch (err) {
+      console.error(`[BotInstance:${this.deps.bot.id}] Failed to send task action card:`, err)
+      return false
+    }
+  }
+
   private templateOptionText(value: string): string {
     const text = value.trim() || '未命名'
     return text.length > 10 ? text.slice(0, 9) + '…' : text
@@ -531,17 +609,24 @@ export class BotInstance {
     })
     ensureImageGenerationProcessorRegistered()
     generationTaskRunner.enqueue(task.id)
+    const cardSent = await this.sendTaskActionCard(runtime, task.id)
     return {
       commandKey: command.commandKey,
       ok: true,
       status: 'success',
-      message: [
-        '已创建图片生成任务。',
-        `任务 ID：${task.id}`,
-        '任务完成后会自动推送结果到当前企微会话。',
-        `查询状态：/task status ${task.id}`,
-        `获取结果：/task result ${task.id}`,
-      ].join('\n'),
+      message: cardSent
+        ? [
+            '已创建图片生成任务，并发送了任务卡片。',
+            `任务 ID：${task.id}`,
+            '任务完成后会自动推送结果到当前企微会话。',
+          ].join('\n')
+        : [
+            '已创建图片生成任务。',
+            `任务 ID：${task.id}`,
+            '任务完成后会自动推送结果到当前企微会话。',
+            `查询状态：/task status ${task.id}`,
+            `获取结果：/task result ${task.id}`,
+          ].join('\n'),
       auditPayload: { taskId: task.id, modelId: model.id },
     }
   }
@@ -721,7 +806,7 @@ export class BotInstance {
     return msg.content.map((c) => (c.type === 'text' ? c.text : '[图片]')).join('\n')
   }
 
-  private async handleEvent(event: IncomingEvent): Promise<void> {
+  async handleEvent(event: IncomingEvent): Promise<void> {
     try {
       await handleIncomingWecomEvent(event, { botId: this.deps.bot.id, contexts: this.deps.contexts })
     } catch (err) {
@@ -729,6 +814,10 @@ export class BotInstance {
     }
 
     try {
+      if (event.eventType === 'enter_chat') {
+        await this.sendCommandMenuCard(this.runtimeFromEvent(event))
+        return
+      }
       const message = await this.handleTemplateCardEvent(event)
       if (message && event.chatId) await this.adapter.sendMessage(event.chatId, message).catch(() => {})
     } catch (err) {
@@ -741,20 +830,36 @@ export class BotInstance {
     if (event.eventType !== 'template_card_event') return null
     const cardEvent = event.eventPayload?.template_card_event
     if (!cardEvent || typeof cardEvent !== 'object') return null
-    if (cardEvent.event_key !== CONTEXT_CARD_EVENT_KEY) return null
-    if (!String(cardEvent.task_id ?? '').startsWith(CONTEXT_CARD_TASK_PREFIX)) return null
+    const eventKey = String(cardEvent.event_key ?? '')
+    const taskId = String(cardEvent.task_id ?? '')
 
-    const contextId = this.selectedTemplateCardOption(cardEvent, CONTEXT_CARD_QUESTION_KEY)
-    if (!contextId) return '未读取到选择的上下文，请重新打开上下文选择卡片后再试。'
-
-    const command = this.createEventCommand('ctx.use', [contextId])
+    const command = this.commandFromTemplateCardEvent(eventKey, taskId, cardEvent)
+    if (!command) return null
     const result = await this.commandExecutor.execute(command, {
-      botId: this.deps.bot.id,
-      chatKey: event.chatKey,
-      chatId: event.chatId ?? event.userId,
-      userId: event.userId,
+      ...this.runtimeFromEvent(event),
     })
     return result.message
+  }
+
+  private commandFromTemplateCardEvent(eventKey: string, taskId: string, cardEvent: Record<string, any>): ParsedWecomCommand | null {
+    if (eventKey === CONTEXT_CARD_EVENT_KEY && taskId.startsWith(CONTEXT_CARD_TASK_PREFIX)) {
+      const contextId = this.selectedTemplateCardOption(cardEvent, CONTEXT_CARD_QUESTION_KEY)
+      return contextId
+        ? this.createEventCommand('ctx.use', [contextId])
+        : this.createEventCommand('ctx.use', [])
+    }
+    if (taskId.startsWith(MENU_CARD_TASK_PREFIX)) {
+      if (eventKey === MENU_EVENT_CURRENT) return this.createEventCommand('ctx.current', [])
+      if (eventKey === MENU_EVENT_LIST) return this.createEventCommand('ctx.list', [])
+      if (eventKey === MENU_EVENT_RESET) return this.createEventCommand('ctx.reset', [])
+      if (eventKey === MENU_EVENT_IMAGE_HELP) return this.createEventCommand('image.generate', [])
+    }
+    if (taskId.startsWith(TASK_CARD_TASK_PREFIX)) {
+      const generationTaskId = taskId.slice(TASK_CARD_TASK_PREFIX.length)
+      if (eventKey === TASK_EVENT_STATUS) return this.createEventCommand('task.status', [generationTaskId])
+      if (eventKey === TASK_EVENT_RESULT) return this.createEventCommand('task.result', [generationTaskId])
+    }
+    return null
   }
 
   private selectedTemplateCardOption(cardEvent: Record<string, any>, questionKey: string): string | null {
@@ -798,13 +903,13 @@ export class BotInstance {
 
     const command = parseWecomCommand(msg.content)
     if (command) {
-      const result = await this.commandExecutor.execute(command, {
-        botId: this.deps.bot.id,
-        chatKey,
-        chatId,
-        userId: msg.userId,
-      })
-      await this.adapter.sendMessage(chatId, result.message).catch(() => {})
+      const runtime = this.runtimeFromMessage(msg)
+      const result = await this.commandExecutor.execute(command, runtime)
+      if (command.commandKey === 'help' && result.ok && await this.sendCommandMenuCard(runtime)) {
+        await this.adapter.sendMessage(chatId, '已发送操作菜单卡片，请点击卡片按钮继续。').catch(() => {})
+      } else {
+        await this.adapter.sendMessage(chatId, result.message).catch(() => {})
+      }
       return
     }
 
