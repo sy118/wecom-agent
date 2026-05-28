@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto'
+import { readFile } from 'fs/promises'
 import type { Client } from '@libsql/client'
 import type { StructuredTool } from '@langchain/core/tools'
 import { AgentEngine, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpToolClient, createSkillTools } from '@wecom-platform/core'
@@ -8,17 +9,18 @@ import { SkillAuditRepository } from '../db/skill-audit-repository.js'
 import { WikiRetrievalLogRepository } from '../db/wiki-retrieval-log-repository.js'
 import { BotResponseRunRepository } from '../db/bot-response-run-repository.js'
 import { AnnotationAnswerRepository } from '../db/annotation-answer-repository.js'
-import { ActiveContextRepository, ContextAccessRepository } from '../db/wecom-access-repository.js'
+import { ActiveContextRepository, CommandPermissionRepository, ContextAccessRepository, WecomUserRepository } from '../db/wecom-access-repository.js'
 import { ModelConfigRepository } from '../db/generation-repository.js'
 import { handleIncomingWecomEvent } from '../services/wecom-event-service.js'
 import { createGenerationTask, formatGenerationTaskResult, formatGenerationTaskStatus, getGenerationTaskForUser, listGeneratedFilesForTask } from '../services/generation-task-service.js'
+import { generatedFileName } from '../services/generated-file-service.js'
 import { assertImageGenerationCapacity, ensureImageGenerationProcessorRegistered } from '../services/image-generation-service.js'
 import { generationTaskRunner } from '../services/generation-task-runner.js'
 import { parseWecomCommand } from '../commands/wecom-command-parser.js'
 import { WecomCommandExecutor } from '../commands/wecom-command-executor.js'
 import type { WecomCommandActor, WecomCommandHandlerResult, WecomCommandRuntime } from '../commands/wecom-command-executor.js'
 import type { ParsedWecomCommand } from '../commands/wecom-command-parser.js'
-import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, IncomingEvent, Session, SessionMessage, BotResponseRun } from '@wecom-platform/types'
+import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, IncomingEvent, Session, SessionMessage, BotResponseRun, GeneratedFile, WecomMediaType, WecomUserRole, WecomUserStatus } from '@wecom-platform/types'
 
 const QUEUE_BACKPRESSURE_LIMIT = 10
 const BUSY_MESSAGE = '当前处理队列繁忙，请稍后再试'
@@ -137,7 +139,6 @@ const MENU_CARD_TASK_PREFIX = 'menu_'
 const MENU_EVENT_CURRENT = 'menu_ctx_current'
 const MENU_EVENT_LIST = 'menu_ctx_list'
 const MENU_EVENT_RESET = 'menu_ctx_reset'
-const MENU_EVENT_IMAGE_HELP = 'menu_image_help'
 const TASK_CARD_TASK_PREFIX = 'gen_task_'
 const TASK_EVENT_STATUS = 'task_status'
 const TASK_EVENT_RESULT = 'task_result'
@@ -158,6 +159,7 @@ export class BotInstance {
   private defaultContext: ContextConfig | null
   private discoveredChats = new Map<string, DiscoveredChat>()
   private commandExecutor: WecomCommandExecutor
+  private completedTemplateCardTasks = new Set<string>()
 
   constructor(private deps: BotInstanceDeps) {
     this.adapter = new WecomAdapter({
@@ -183,7 +185,8 @@ export class BotInstance {
   ): Promise<WecomCommandHandlerResult | null> {
     return (await this.handleContextCommand(command, runtime, actor))
       ?? (await this.handleTaskCommand(command, runtime, actor))
-      ?? this.handleImageCommand(command, runtime, actor)
+      ?? (await this.handleImageCommand(command, runtime, actor))
+      ?? this.handleAdminCommand(command, runtime, actor)
   }
 
   private runtimeFromMessage(msg: IncomingMessage): WecomCommandRuntime {
@@ -390,6 +393,10 @@ export class BotInstance {
       text: this.templateOptionText(context.name || context.id),
     }))
     if (options.length === 0) return false
+    const current = await this.resolveEffectiveContext(runtime.chatKey, runtime.userId)
+    const selectedId = options.some((option) => option.id === current?.context.id)
+      ? current!.context.id
+      : options[0].id
     try {
       await this.adapter.sendTemplateCard(runtime.chatId, {
         card_type: 'multiple_interaction',
@@ -402,7 +409,7 @@ export class BotInstance {
           {
             question_key: CONTEXT_CARD_QUESTION_KEY,
             title: '上下文',
-            selected_id: options[0].id,
+            selected_id: selectedId,
             option_list: options,
           },
         ],
@@ -427,14 +434,21 @@ export class BotInstance {
         source: { desc: '企微助手' },
         main_title: {
           title: '操作菜单',
-          desc: this.isGroupChat(runtime.chatKey) ? '群聊上下文切换会对本群生效' : '选择一个操作继续',
+          desc: this.isGroupChat(runtime.chatKey) ? '群聊上下文切换会对本群生效' : '选择一个可直接执行的操作',
         },
-        sub_title_text: '图片生成仍需发送文字描述，例如：/image 一张发布会海报',
+        sub_title_text: '需要补充内容的功能请直接发送文字命令。',
+        horizontal_content_list: [
+          { keyname: '图片', value: '/image 描述' },
+          { keyname: '任务', value: '/task result ID' },
+          { keyname: '用户', value: '/admin user upsert ID' },
+          { keyname: '授权', value: '/admin ctx grant 用户 上下文' },
+          { keyname: '权限', value: '/admin command set 命令 角色 on' },
+          { keyname: '更多', value: '/help 查看完整命令' },
+        ],
         button_list: [
           { text: '当前上下文', style: 1, key: MENU_EVENT_CURRENT },
           { text: '切换上下文', style: 1, key: MENU_EVENT_LIST },
           { text: '重置上下文', style: 2, key: MENU_EVENT_RESET },
-          { text: '图片生成', style: 1, key: MENU_EVENT_IMAGE_HELP },
         ],
         task_id: `${MENU_CARD_TASK_PREFIX}${randomUUID()}`,
       })
@@ -541,6 +555,20 @@ export class BotInstance {
     }
 
     const files = await listGeneratedFilesForTask(access.task)
+    if (access.task.status === 'succeeded' && files.length > 0) {
+      const sentCount = await this.sendGeneratedFilesToChat(runtime.chatId, files)
+      if (sentCount > 0) {
+        return {
+          commandKey: command.commandKey,
+          ok: true,
+          status: 'success',
+          message: sentCount === files.length
+            ? `已发送 ${sentCount} 个结果文件到当前会话。`
+            : `已发送 ${sentCount}/${files.length} 个结果文件到当前会话，其余文件发送失败，请稍后重试。`,
+          auditPayload: { taskId, fileCount: files.length, sentCount },
+        }
+      }
+    }
     return {
       commandKey: command.commandKey,
       ok: true,
@@ -629,6 +657,130 @@ export class BotInstance {
           ].join('\n'),
       auditPayload: { taskId: task.id, modelId: model.id },
     }
+  }
+
+  private async handleAdminCommand(
+    command: ParsedWecomCommand,
+    runtime: WecomCommandRuntime,
+    actor: WecomCommandActor
+  ): Promise<WecomCommandHandlerResult | null> {
+    if (!command.commandKey.startsWith('admin.')) return null
+    if (actor.role !== 'admin') {
+      return {
+        commandKey: command.commandKey,
+        ok: false,
+        status: 'permission_denied',
+        message: '只有超级管理员可以执行该管理命令。',
+        auditReason: 'admin_role_required',
+      }
+    }
+
+    if (command.commandKey === 'admin.user.upsert') {
+      const wecomUserId = command.args[0]
+      const parsed = parseUserUpsertArgs(command.args.slice(1))
+      const user = await WecomUserRepository.upsert({
+        botId: this.deps.bot.id,
+        wecomUserId,
+        role: parsed.role,
+        status: parsed.status,
+        displayName: parsed.displayName,
+      })
+      return {
+        commandKey: command.commandKey,
+        ok: true,
+        status: 'success',
+        message: [
+          '已维护企微用户。',
+          `用户ID：${user.wecomUserId}`,
+          `角色：${formatWecomRole(user.role)}`,
+          `状态：${user.status === 'active' ? '启用' : '禁用'}`,
+        ].join('\n'),
+        auditPayload: { wecomUserId, role: parsed.role, status: parsed.status, displayName: parsed.displayName },
+      }
+    }
+
+    if (command.commandKey === 'admin.ctx.grant') {
+      const wecomUserId = command.args[0]
+      const contextId = command.args[1]
+      const context = this.contextMap.get(contextId)
+      if (!context || context.botId !== this.deps.bot.id) {
+        return {
+          commandKey: command.commandKey,
+          ok: false,
+          status: 'not_found',
+          message: '未找到该上下文，无法授权。',
+          auditReason: 'context_not_found',
+          auditPayload: { contextId, wecomUserId },
+        }
+      }
+      await ContextAccessRepository.grant({
+        botId: this.deps.bot.id,
+        contextId,
+        wecomUserId,
+        accessLevel: 'use',
+        grantedBy: runtime.userId,
+      })
+      return {
+        commandKey: command.commandKey,
+        ok: true,
+        status: 'success',
+        message: `已授权 ${wecomUserId} 切换上下文：${context.name} (${context.id})`,
+        auditPayload: { contextId, wecomUserId, accessLevel: 'use' },
+      }
+    }
+
+    if (command.commandKey === 'admin.ctx.revoke') {
+      const wecomUserId = command.args[0]
+      const contextId = command.args[1]
+      await ContextAccessRepository.deleteGrant(this.deps.bot.id, contextId, wecomUserId)
+      await ActiveContextRepository.clearForUser(this.deps.bot.id, wecomUserId)
+      return {
+        commandKey: command.commandKey,
+        ok: true,
+        status: 'success',
+        message: `已删除 ${wecomUserId} 的可切换上下文授权：${contextId}`,
+        auditPayload: { contextId, wecomUserId },
+      }
+    }
+
+    if (command.commandKey === 'admin.command.set') {
+      const commandKey = command.args[0]
+      const role = parseWecomRole(command.args[1])
+      const enabled = parseOnOff(command.args[2])
+      const requireConfirm = parseConfirmMode(command.args[3])
+      if (!role || enabled === null) {
+        return {
+          commandKey: command.commandKey,
+          ok: false,
+          status: 'argument_error',
+          message: '参数不正确。格式：/admin command set <commandKey> <user|manager|admin> <on|off> [confirm|direct]',
+          auditReason: 'invalid_admin_command_set_args',
+          auditPayload: { args: command.args },
+        }
+      }
+      const permission = await CommandPermissionRepository.set({
+        botId: this.deps.bot.id,
+        commandKey,
+        role,
+        enabled,
+        requireConfirm,
+      })
+      return {
+        commandKey: command.commandKey,
+        ok: true,
+        status: 'success',
+        message: [
+          '已更新命令权限。',
+          `命令：${permission.commandKey}`,
+          `角色：${formatWecomRole(permission.role)}`,
+          `状态：${permission.enabled ? '启用' : '禁用'}`,
+          `执行方式：${permission.requireConfirm ? '二次确认' : '直接执行'}`,
+        ].join('\n'),
+        auditPayload: { commandKey, role, enabled, requireConfirm },
+      }
+    }
+
+    return null
   }
 
   async start(): Promise<void> {
@@ -799,6 +951,28 @@ export class BotInstance {
     await this.adapter.sendMessage(chatId, text)
   }
 
+  async sendGeneratedFiles(chatId: string, files: GeneratedFile[]): Promise<number> {
+    return this.sendGeneratedFilesToChat(chatId, files)
+  }
+
+  private async sendGeneratedFilesToChat(chatId: string, files: GeneratedFile[]): Promise<number> {
+    if (!this.adapter.sendMediaMessage) return 0
+    let sent = 0
+    for (const file of files) {
+      try {
+        const bytes = await readFile(file.storagePath)
+        await this.adapter.sendMediaMessage(chatId, wecomMediaTypeForGeneratedFile(file), {
+          bytes,
+          filename: generatedFileName(file),
+        })
+        sent++
+      } catch (err) {
+        console.error(`[BotInstance:${this.deps.bot.id}] Failed to send generated file ${file.id}:`, err)
+      }
+    }
+    return sent
+  }
+
   private resolveContent(msg: IncomingMessage): string | IncomingContent[] {
     if (!Array.isArray(msg.content)) return msg.content
     if (this.deps.bot.visionEnabled) return msg.content
@@ -818,27 +992,68 @@ export class BotInstance {
         await this.sendCommandMenuCard(this.runtimeFromEvent(event))
         return
       }
-      const message = await this.handleTemplateCardEvent(event)
-      if (message && event.chatId) await this.adapter.sendMessage(event.chatId, message).catch(() => {})
+      const handled = await this.handleTemplateCardEvent(event)
+      if (handled?.message && event.chatId) await this.adapter.sendMessage(event.chatId, handled.message).catch(() => {})
     } catch (err) {
       console.error(`[BotInstance:${this.deps.bot.id}] Failed to handle WeCom template card event:`, err)
       if (event.chatId) await this.adapter.sendMessage(event.chatId, '处理卡片操作失败，请稍后重试。').catch(() => {})
     }
   }
 
-  private async handleTemplateCardEvent(event: IncomingEvent): Promise<string | null> {
+  private async handleTemplateCardEvent(event: IncomingEvent): Promise<{ message: string; ok: boolean } | null> {
     if (event.eventType !== 'template_card_event') return null
     const cardEvent = event.eventPayload?.template_card_event
     if (!cardEvent || typeof cardEvent !== 'object') return null
     const eventKey = String(cardEvent.event_key ?? '')
     const taskId = String(cardEvent.task_id ?? '')
+    const oneShot = this.isOneShotTemplateCardTask(taskId, eventKey)
+    if (oneShot && this.completedTemplateCardTasks.has(taskId)) {
+      return { message: '该卡片已处理，无需重复操作。', ok: true }
+    }
 
     const command = this.commandFromTemplateCardEvent(eventKey, taskId, cardEvent)
     if (!command) return null
     const result = await this.commandExecutor.execute(command, {
       ...this.runtimeFromEvent(event),
     })
-    return result.message
+    if (result.ok && oneShot) {
+      this.rememberCompletedTemplateCardTask(taskId)
+      await this.updateTemplateCardDone(event, taskId, result.message)
+    }
+    return { message: result.message, ok: result.ok }
+  }
+
+  private isOneShotTemplateCardTask(taskId: string, eventKey: string): boolean {
+    return taskId.startsWith(CONTEXT_CARD_TASK_PREFIX)
+      || (taskId.startsWith(TASK_CARD_TASK_PREFIX) && eventKey === TASK_EVENT_RESULT)
+  }
+
+  private rememberCompletedTemplateCardTask(taskId: string): void {
+    this.completedTemplateCardTasks.add(taskId)
+    if (this.completedTemplateCardTasks.size > 1000) {
+      const first = this.completedTemplateCardTasks.values().next().value
+      if (first) this.completedTemplateCardTasks.delete(first)
+    }
+  }
+
+  private async updateTemplateCardDone(event: IncomingEvent, taskId: string, message: string): Promise<void> {
+    if (!this.adapter.updateTemplateCard) return
+    const summary = message.split('\n').find((line) => line.trim())?.trim() ?? '操作已完成'
+    try {
+      await this.adapter.updateTemplateCard(event, {
+        card_type: 'text_notice',
+        source: { desc: '企微助手', desc_color: 3 },
+        main_title: {
+          title: '操作已完成',
+          desc: summary.length > 30 ? `${summary.slice(0, 29)}…` : summary,
+        },
+        sub_title_text: '该卡片已处理，无需重复点击。',
+        card_action: { type: 0 },
+        task_id: taskId,
+      })
+    } catch (err) {
+      console.error(`[BotInstance:${this.deps.bot.id}] Failed to update template card ${taskId}:`, err)
+    }
   }
 
   private commandFromTemplateCardEvent(eventKey: string, taskId: string, cardEvent: Record<string, any>): ParsedWecomCommand | null {
@@ -852,7 +1067,6 @@ export class BotInstance {
       if (eventKey === MENU_EVENT_CURRENT) return this.createEventCommand('ctx.current', [])
       if (eventKey === MENU_EVENT_LIST) return this.createEventCommand('ctx.list', [])
       if (eventKey === MENU_EVENT_RESET) return this.createEventCommand('ctx.reset', [])
-      if (eventKey === MENU_EVENT_IMAGE_HELP) return this.createEventCommand('image.generate', [])
     }
     if (taskId.startsWith(TASK_CARD_TASK_PREFIX)) {
       const generationTaskId = taskId.slice(TASK_CARD_TASK_PREFIX.length)
@@ -906,7 +1120,7 @@ export class BotInstance {
       const runtime = this.runtimeFromMessage(msg)
       const result = await this.commandExecutor.execute(command, runtime)
       if (command.commandKey === 'help' && result.ok && await this.sendCommandMenuCard(runtime)) {
-        await this.adapter.sendMessage(chatId, '已发送操作菜单卡片，请点击卡片按钮继续。').catch(() => {})
+        await this.adapter.sendMessage(chatId, `已发送操作菜单卡片。\n\n${result.message}`).catch(() => {})
       } else {
         await this.adapter.sendMessage(chatId, result.message).catch(() => {})
       }
@@ -1683,6 +1897,63 @@ function firstWikiNamespaceFromConfigs(mcpConfigs: McpConfig[]): string | null {
     }
   }
   return null
+}
+
+function wecomMediaTypeForGeneratedFile(file: GeneratedFile): WecomMediaType {
+  if (file.fileType === 'image' || file.mimeType?.startsWith('image/')) return 'image'
+  return 'file'
+}
+
+function parseWecomRole(value?: string): WecomUserRole | null {
+  if (value === 'user' || value === '普通用户') return 'user'
+  if (value === 'manager' || value === '管理员') return 'manager'
+  if (value === 'admin' || value === '超级管理员') return 'admin'
+  return null
+}
+
+function parseWecomStatus(value?: string): WecomUserStatus | null {
+  if (value === 'active' || value === '启用') return 'active'
+  if (value === 'disabled' || value === '禁用') return 'disabled'
+  return null
+}
+
+function parseOnOff(value?: string): boolean | null {
+  const normalized = value?.toLowerCase()
+  if (normalized === 'on' || normalized === 'true' || normalized === 'enable' || normalized === 'enabled' || value === '启用') return true
+  if (normalized === 'off' || normalized === 'false' || normalized === 'disable' || normalized === 'disabled' || value === '禁用') return false
+  return null
+}
+
+function parseConfirmMode(value?: string): boolean {
+  const normalized = value?.toLowerCase()
+  return normalized === 'confirm' || normalized === 'yes' || normalized === 'true' || value === '二次确认'
+}
+
+function parseUserUpsertArgs(args: string[]): { role: WecomUserRole; status: WecomUserStatus; displayName: string | null } {
+  let role: WecomUserRole = 'user'
+  let status: WecomUserStatus = 'active'
+  const displayNameParts = [...args]
+  const firstRole = parseWecomRole(displayNameParts[0])
+  if (firstRole) {
+    role = firstRole
+    displayNameParts.shift()
+  }
+  const firstStatus = parseWecomStatus(displayNameParts[0])
+  if (firstStatus) {
+    status = firstStatus
+    displayNameParts.shift()
+  }
+  return {
+    role,
+    status,
+    displayName: displayNameParts.join(' ').trim() || null,
+  }
+}
+
+function formatWecomRole(role: WecomUserRole): string {
+  if (role === 'admin') return '超级管理员'
+  if (role === 'manager') return '管理员'
+  return '普通用户'
 }
 
 function isWikiReadHit(output: string): boolean {

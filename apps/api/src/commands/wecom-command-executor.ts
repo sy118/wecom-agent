@@ -203,7 +203,7 @@ export class WecomCommandExecutor {
       }
     }
 
-    if (permission.requireConfirm || command.commandKey.startsWith('admin.')) {
+    if (permission.requireConfirm) {
       const confirmation = await CommandConfirmationRepository.create({
         botId: runtime.botId,
         chatKey: runtime.chatKey,

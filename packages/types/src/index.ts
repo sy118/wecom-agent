@@ -219,6 +219,13 @@ export type IncomingContent =
   | { type: 'text'; text: string }
   | { type: 'image'; url: string }
 
+export type WecomMediaType = 'file' | 'image' | 'voice' | 'video'
+
+export interface IMMediaFile {
+  bytes: Uint8Array
+  filename: string
+}
+
 export interface IMAdapter {
   start(): Promise<void>
   stop(): Promise<void>
@@ -228,6 +235,10 @@ export interface IMAdapter {
   sendMessage(chatId: string, text: string): Promise<void | string>
   /** Sends a WeCom template_card payload when supported by the adapter. */
   sendTemplateCard?(chatId: string, templateCard: Record<string, any>): Promise<void | string>
+  /** Uploads and sends a WeCom media message when supported by the adapter. */
+  sendMediaMessage?(chatId: string, mediaType: WecomMediaType, file: IMMediaFile): Promise<void | string>
+  /** Updates a WeCom template_card after a template card event when supported by the adapter. */
+  updateTemplateCard?(event: IncomingEvent, templateCard: Record<string, any>, userIds?: string[]): Promise<void | string>
   /** Throws if platform does not support editing — caller must catch and fallback */
   editMessage(chatId: string, messageId: string, text: string): Promise<void>
 }

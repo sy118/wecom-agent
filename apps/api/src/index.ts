@@ -75,6 +75,19 @@ generationTaskRunner.on('finished', async ({ task }) => {
   try {
     const files = await listGeneratedFilesForTask(task)
     const taskName = task.taskType === 'image' ? '图片生成' : '生成任务'
+    if (task.status === 'succeeded' && files.length > 0) {
+      const sentCount = await botManager.sendGeneratedFilesForTask(task.botId, task.chatId, files)
+      if (sentCount > 0) {
+        await botManager.sendMessageForTask(
+          task.botId,
+          task.chatId,
+          sentCount === files.length
+            ? `${taskName}已完成，已发送 ${sentCount} 个结果文件。`
+            : `${taskName}已完成，已发送 ${sentCount}/${files.length} 个结果文件，其余文件发送失败，可点击任务卡片“取结果”重试。`
+        )
+        return
+      }
+    }
     const prefix = task.status === 'succeeded'
       ? `${taskName}已完成，结果如下：`
       : `${taskName}失败，详情如下：`

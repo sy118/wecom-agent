@@ -15,7 +15,7 @@ const [
   { WikiRetrievalLogRepository },
   { BotRepository },
   { ContextRepository },
-  { ActiveContextRepository, ContextAccessRepository, WecomUserRepository },
+  { ActiveContextRepository, CommandPermissionRepository, ContextAccessRepository, WecomUserRepository },
   { GeneratedFileRepository, GenerationTaskRepository, ModelConfigRepository },
   { BotResponseRunRepository },
   { generationTaskRunner },
@@ -177,14 +177,24 @@ async function waitFor(assertion: () => boolean | Promise<boolean>, timeoutMs = 
 function makeFakeAdapter() {
   const sent: Array<{ chatId: string; text: string }> = []
   const cards: Array<{ chatId: string; card: Record<string, any> }> = []
+  const media: Array<{ chatId: string; mediaType: string; filename: string; bytes: Uint8Array }> = []
+  const updates: Array<{ event: any; card: Record<string, any>; userIds?: string[] }> = []
   const streams: Array<{ text: string; feedbackId?: string | null; finish?: boolean }> = []
   return {
     sent,
     cards,
+    media,
+    updates,
     streams,
     isReconnecting: () => false,
     sendMessage: async (chatId: string, text: string) => { sent.push({ chatId, text }) },
     sendTemplateCard: async (chatId: string, card: Record<string, any>) => { cards.push({ chatId, card }) },
+    sendMediaMessage: async (chatId: string, mediaType: string, file: { bytes: Uint8Array; filename: string }) => {
+      media.push({ chatId, mediaType, filename: file.filename, bytes: file.bytes })
+    },
+    updateTemplateCard: async (event: any, card: Record<string, any>, userIds?: string[]) => {
+      updates.push({ event, card, userIds })
+    },
     sendThinkingWithStream: async (_frame: any, text: string, feedbackId?: string | null) => {
       streams.push({ text, feedbackId, finish: false })
       return `stream-${streams.length}`
@@ -493,8 +503,14 @@ test('BotInstance context commands switch immediately and isolate sessions', asy
 
 test('BotInstance sends context selection cards and handles template card events', async () => {
   const bot = await makePersistedBot()
+  const currentContext = await makePersistedContext(bot.id, 'Card Current', { isDefault: true })
   const targetContext = await makePersistedContext(bot.id, 'Card Target')
   await WecomUserRepository.upsert({ botId: bot.id, wecomUserId: 'card-user', role: 'user' })
+  await ContextAccessRepository.grant({
+    botId: bot.id,
+    contextId: currentContext.id,
+    wecomUserId: 'card-user',
+  })
   await ContextAccessRepository.grant({
     botId: bot.id,
     contextId: targetContext.id,
@@ -502,7 +518,7 @@ test('BotInstance sends context selection cards and handles template card events
   })
 
   const chatKey = `wecom:user:card-${Date.now()}`
-  const instance = makeInstanceForBot(bot, [targetContext])
+  const instance = makeInstanceForBot(bot, [currentContext, targetContext])
   const adapter = makeFakeAdapter()
   try {
     ;(instance as any).adapter = adapter
@@ -518,6 +534,7 @@ test('BotInstance sends context selection cards and handles template card events
     assert.equal(adapter.cards.length, 1)
     assert.equal(adapter.cards[0].card.card_type, 'multiple_interaction')
     assert.equal(adapter.cards[0].card.submit_button.key, 'ctx_use_submit')
+    assert.equal(adapter.cards[0].card.select_list[0].selected_id, currentContext.id)
 
     await (instance as any).handleEvent({
       msgId: `ctx-card-event-${Date.now()}`,
@@ -550,6 +567,7 @@ test('BotInstance sends context selection cards and handles template card events
     })
 
     assert.equal((await ActiveContextRepository.findForUser(bot.id, chatKey, 'card-user'))?.contextId, targetContext.id)
+    assert.equal(adapter.updates.some((item) => item.card.main_title?.title === '操作已完成'), true)
     assert.equal(adapter.sent.some((item) => item.text.includes(targetContext.name)), true)
   } finally {
     ;(instance as any).sessions.destroy()
@@ -573,6 +591,8 @@ test('BotInstance sends menu cards for help and enter-chat events', async () => 
     })
     assert.equal(adapter.cards.some((item) => item.card.card_type === 'button_interaction'), true)
     assert.equal(adapter.cards.some((item) => item.card.button_list?.some((button: any) => button.key === 'menu_ctx_list')), true)
+    assert.equal(adapter.cards.some((item) => item.card.button_list?.some((button: any) => button.key === 'menu_image_help')), false)
+    assert.equal(adapter.cards.some((item) => item.card.horizontal_content_list?.some((row: any) => row.value === '/image 描述')), true)
 
     await (instance as any).handleEvent({
       msgId: `enter-menu-${Date.now()}`,
@@ -589,6 +609,50 @@ test('BotInstance sends menu cards for help and enter-chat events', async () => 
       eventPayload: { eventtype: 'enter_chat' },
     })
     assert.equal(adapter.cards.length >= 2, true)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance executes admin maintenance commands from WeCom text commands', async () => {
+  const bot = await makePersistedBot()
+  const context = await makePersistedContext(bot.id, 'Admin Context')
+  await WecomUserRepository.upsert({ botId: bot.id, wecomUserId: 'admin-user', role: 'admin' })
+  const instance = makeInstanceForBot(bot, [context])
+  const adapter = makeFakeAdapter()
+  try {
+    ;(instance as any).adapter = adapter
+
+    await (instance as any).handleMessage({
+      chatId: 'admin-chat-id',
+      chatKey: 'wecom:user:admin-user',
+      chatType: 'single',
+      userId: 'admin-user',
+      content: '/admin user upsert target-user manager active 张三',
+      rawBody: { msgid: `admin-user-upsert-${Date.now()}` },
+    })
+    assert.equal((await WecomUserRepository.findByWecomUserId(bot.id, 'target-user'))?.role, 'manager')
+    assert.equal(adapter.sent.some((item) => item.text.includes('已维护企微用户')), true)
+
+    await (instance as any).handleMessage({
+      chatId: 'admin-chat-id',
+      chatKey: 'wecom:user:admin-user',
+      chatType: 'single',
+      userId: 'admin-user',
+      content: `/admin ctx grant target-user ${context.id}`,
+      rawBody: { msgid: `admin-ctx-grant-${Date.now()}` },
+    })
+    assert.equal((await ContextAccessRepository.hasAccess(bot.id, 'target-user', context.id)), true)
+
+    await (instance as any).handleMessage({
+      chatId: 'admin-chat-id',
+      chatKey: 'wecom:user:admin-user',
+      chatType: 'single',
+      userId: 'admin-user',
+      content: '/admin command set image.generate manager off',
+      rawBody: { msgid: `admin-command-set-${Date.now()}` },
+    })
+    assert.equal((await CommandPermissionRepository.check(bot.id, 'image.generate', 'manager')).allowed, false)
   } finally {
     ;(instance as any).sessions.destroy()
   }
@@ -695,13 +759,16 @@ test('BotInstance handles task status and result commands with owner permissions
     chatKey: 'chat-1',
     chatId: 'chat-id',
   })
+  const resultPath = join(tempDir, `result-${Date.now()}.png`)
+  await writeFile(resultPath, Buffer.from('fake-png'))
   const file = await GeneratedFileRepository.create({
     taskId: task.id,
     botId: bot.id,
     ownerUserId: 'owner-user',
     chatKey: 'chat-1',
     fileType: 'image',
-    storagePath: '/tmp/result.png',
+    storagePath: resultPath,
+    mimeType: 'image/png',
     accessToken: 'task-result-token',
   })
   await GenerationTaskRepository.markSucceeded(task.id, [file.id])
@@ -740,7 +807,8 @@ test('BotInstance handles task status and result commands with owner permissions
     })
 
     assert.equal(adapter.sent.some((item) => item.text.includes('状态：succeeded')), true)
-    assert.equal(adapter.sent.some((item) => item.text.includes('/api/generated-files/task-result-token')), true)
+    assert.equal(adapter.media.some((item) => item.chatId === 'task-chat-id' && item.mediaType === 'image'), true)
+    assert.equal(adapter.sent.some((item) => item.text.includes('已发送 1 个结果文件到当前会话')), true)
     assert.equal(adapter.sent.some((item) => item.text.includes('没有查看该任务的权限')), true)
   } finally {
     ;(instance as any).sessions.destroy()
