@@ -62,6 +62,33 @@ test('AgentEngine converts tool errors into model-readable output', async () => 
   assert.match(String(output), /请不要重复调用/)
 })
 
+test('WecomAdapter uploads and sends media messages', async () => {
+  const adapter = new WecomAdapter({ botId: 'bot', secret: 'secret', wsUrl: 'ws://example.test' })
+  const calls: any[] = []
+  ;(adapter as any).client = {
+    uploadMedia: async (buffer: Buffer, options: any) => {
+      calls.push({ type: 'upload', buffer, options })
+      return { media_id: 'media-1' }
+    },
+    sendMediaMessage: async (chatId: string, mediaType: string, mediaId: string) => {
+      calls.push({ type: 'send', chatId, mediaType, mediaId })
+    },
+  }
+
+  await adapter.sendMediaMessage('chat-1', 'image', {
+    bytes: Buffer.from('image-bytes'),
+    filename: 'result.png',
+  })
+
+  assert.equal(calls[0].type, 'upload')
+  assert.equal(calls[0].options.type, 'image')
+  assert.equal(calls[0].options.filename, 'result.png')
+  assert.equal(calls[1].type, 'send')
+  assert.equal(calls[1].chatId, 'chat-1')
+  assert.equal(calls[1].mediaType, 'image')
+  assert.equal(calls[1].mediaId, 'media-1')
+})
+
 test('AgentEngine times out slow tool calls before the whole agent invoke timeout', async () => {
   const [tool] = __testWrapToolsForAgent([
     {

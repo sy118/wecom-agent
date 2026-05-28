@@ -6,7 +6,7 @@ import { BindingRepository } from '../db/binding-repository.js'
 import { McpServerRepository } from '../db/mcp-server-repository.js'
 import { SkillRepository } from '../db/skill-repository.js'
 import { db } from '../db/client.js'
-import type { BotStatus, BotStatusEvent, ContextConfig, IncomingEvent } from '@wecom-platform/types'
+import type { BotStatus, BotStatusEvent, ContextConfig, GeneratedFile, IncomingEvent } from '@wecom-platform/types'
 
 export class BotManager extends EventEmitter {
   private instances = new Map<string, BotInstance>()
@@ -164,6 +164,12 @@ export class BotManager extends EventEmitter {
     const instance = this.instances.get(botId)
     if (!instance) throw new Error(`Bot ${botId} is not running`)
     await instance.sendMessage(chatId, text)
+  }
+
+  async sendGeneratedFilesForTask(botId: string, chatId: string, files: GeneratedFile[]): Promise<number> {
+    const instance = this.instances.get(botId)
+    if (!instance) throw new Error(`Bot ${botId} is not running`)
+    return instance.sendGeneratedFiles(chatId, files)
   }
 
   async handleWecomEvent(botId: string, event: IncomingEvent): Promise<boolean> {

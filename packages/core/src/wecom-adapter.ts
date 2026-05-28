@@ -1,6 +1,6 @@
 import { randomUUID, createDecipheriv } from 'crypto'
 import { WSClient, MessageType } from '@wecom/aibot-node-sdk'
-import type { IMAdapter, IncomingMessage, IncomingContent, IncomingEvent } from '@wecom-platform/types'
+import type { IMAdapter, IncomingMessage, IncomingContent, IncomingEvent, IMMediaFile, WecomMediaType } from '@wecom-platform/types'
 
 export interface WecomCredentials {
   botId: string
@@ -106,6 +106,20 @@ export class WecomAdapter implements IMAdapter {
 
   async sendTemplateCard(chatId: string, templateCard: Record<string, any>): Promise<void | string> {
     await this.client.sendMessage(chatId, { msgtype: 'template_card', template_card: templateCard } as any)
+  }
+
+  async sendMediaMessage(chatId: string, mediaType: WecomMediaType, file: IMMediaFile): Promise<void | string> {
+    const upload = await this.client.uploadMedia(Buffer.from(file.bytes), {
+      type: mediaType,
+      filename: file.filename,
+    })
+    await this.client.sendMediaMessage(chatId, mediaType as any, upload.media_id)
+  }
+
+  async updateTemplateCard(event: IncomingEvent, templateCard: Record<string, any>, userIds?: string[]): Promise<void | string> {
+    const frame = (event.rawBody as any)?._frame
+    if (!frame) throw new Error('WecomAdapter: template card update requires the original event frame')
+    await this.client.updateTemplateCard(frame, templateCard as any, userIds)
   }
 
   /**
@@ -258,7 +272,8 @@ export class WecomAdapter implements IMAdapter {
 
   private async parseEventFrame(frame: any): Promise<IncomingEvent | null> {
     const { body } = frame
-    return parseWecomEventBody(body)
+    const event = parseWecomEventBody(body)
+    return event ? { ...event, rawBody: { ...body, _frame: frame } } : null
   }
 
   private async parseQuote(quote: QuoteBody | undefined, chatType: 'single' | 'group'): Promise<IncomingContent[]> {

@@ -71,9 +71,17 @@ export function formatGenerationTaskResult(task: GenerationTask, files: Generate
   if (task.status !== 'succeeded') return `${formatGenerationTaskStatus(task)}\n任务尚未完成。`
   if (files.length === 0) return `${formatGenerationTaskStatus(task)}\n任务已完成，但没有可下载文件。`
   const normalizedBaseUrl = baseUrl?.replace(/\/+$/, '')
+  if (!normalizedBaseUrl) {
+    return [
+      `${formatGenerationTaskStatus(task)}`,
+      `结果文件：${files.length} 个`,
+      '文件已生成，但当前未配置可外部访问的 PUBLIC_BASE_URL，无法生成可点击下载链接。',
+      '在企业微信中请点击任务卡片“取结果”重新发送文件；如果仍失败，请联系管理员检查企微媒体上传配置。',
+    ].join('\n')
+  }
   const links = files.map((file, index) => {
     const path = `/api/generated-files/${encodeURIComponent(file.accessToken)}`
-    const url = normalizedBaseUrl ? `${normalizedBaseUrl}${path}` : path
+    const url = `${normalizedBaseUrl}${path}`
     return `${index + 1}. ${file.fileType}：${url}`
   })
   return [`${formatGenerationTaskStatus(task)}`, '结果文件：', ...links].join('\n')
