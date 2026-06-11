@@ -40,14 +40,31 @@ async function decryptImageToDataUrl(url: string, aeskey: string): Promise<strin
   if (!res.ok) throw new Error(`Image download failed: ${res.status}`)
   const encrypted = Buffer.from(await res.arrayBuffer())
   const key = Buffer.from(aeskey, 'base64')
+  if (key.length !== 32) throw new Error(`Invalid WeCom image aeskey length: ${key.length}`)
   const iv = key.subarray(0, 16)
-  const decipher = createDecipheriv(`aes-${key.length * 8}-cbc`, key, iv)
-  const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()])
+  const decipher = createDecipheriv('aes-256-cbc', key, iv)
+  decipher.setAutoPadding(false)
+  const decrypted = stripWecomPadding(Buffer.concat([decipher.update(encrypted), decipher.final()]))
   return `data:image/jpeg;base64,${decrypted.toString('base64')}`
 }
 
 export async function decryptWecomImage(url: string, aeskey: string): Promise<string> {
   return decryptImageToDataUrl(url, aeskey)
+}
+
+function stripWecomPadding(buffer: Buffer): Buffer {
+  if (buffer.length === 0) throw new Error('Invalid WeCom image payload: empty decrypted buffer')
+
+  const padLength = buffer[buffer.length - 1]
+  if (padLength < 1 || padLength > 32 || padLength > buffer.length) {
+    throw new Error(`Invalid WeCom image padding: ${padLength}`)
+  }
+
+  for (let i = buffer.length - padLength; i < buffer.length; i++) {
+    if (buffer[i] !== padLength) throw new Error('Invalid WeCom image padding bytes')
+  }
+
+  return buffer.subarray(0, buffer.length - padLength)
 }
 
 export class WecomAdapter implements IMAdapter {

@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict'
+import { createCipheriv } from 'node:crypto'
 import test from 'node:test'
 import { AIMessage, HumanMessage } from '@langchain/core/messages'
-import { WecomAdapter } from './wecom-adapter.js'
+import { WecomAdapter, decryptWecomImage } from './wecom-adapter.js'
 import { __testConfiguredPositiveInt, __testCreateTimeoutResponse, __testExtractLastNonEmptyAiText, __testWithCollectedFallback, __testWrapToolsForAgent } from './agent-engine.js'
 
 test('AgentEngine reads positive integer timeout environment values', () => {
@@ -87,6 +88,32 @@ test('WecomAdapter uploads and sends media messages', async () => {
   assert.equal(calls[1].chatId, 'chat-1')
   assert.equal(calls[1].mediaType, 'image')
   assert.equal(calls[1].mediaId, 'media-1')
+})
+
+test('decryptWecomImage removes WeCom 32-byte PKCS padding', async () => {
+  const originalFetch = globalThis.fetch
+  const key = Buffer.from(Array.from({ length: 32 }, (_, index) => index + 1))
+  const iv = key.subarray(0, 16)
+  const plaintext = Buffer.from('123456789012345')
+  const padLength = 32 - (plaintext.length % 32)
+  const padded = Buffer.concat([plaintext, Buffer.alloc(padLength, padLength)])
+  const cipher = createCipheriv('aes-256-cbc', key, iv)
+  cipher.setAutoPadding(false)
+  const encrypted = Buffer.concat([cipher.update(padded), cipher.final()])
+
+  globalThis.fetch = async () => ({
+    ok: true,
+    arrayBuffer: async () => encrypted.buffer.slice(encrypted.byteOffset, encrypted.byteOffset + encrypted.byteLength),
+  }) as Response
+
+  try {
+    const dataUrl = await decryptWecomImage('https://example.test/a.jpg', key.toString('base64'))
+    const decoded = Buffer.from(dataUrl.replace(/^data:image\/jpeg;base64,/, ''), 'base64')
+
+    assert.deepEqual(decoded, plaintext)
+  } finally {
+    globalThis.fetch = originalFetch
+  }
 })
 
 test('AgentEngine times out slow tool calls before the whole agent invoke timeout', async () => {
