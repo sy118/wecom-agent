@@ -951,6 +951,72 @@ test('BotInstance keeps previous MCP tools when reload of an enabled server fail
   }
 })
 
+test('BotInstance retries MCP tool once after HTTP session invalidation', async () => {
+  const instance = makeInstance()
+  try {
+    let originalCalls = 0
+    let reloadCalls = 0
+    let replacementCalls = 0
+    const originalTool = {
+      name: 'query',
+      invoke: async () => {
+        originalCalls++
+        throw new Error('Streamable HTTP error: Error POSTing to endpoint: {"jsonrpc":"2.0","error":{"code":-32001,"message":"Session not found. Re-initialize."},"id":null}')
+      },
+    } as unknown as StructuredTool
+    const replacementTool = {
+      name: 'query',
+      invoke: async (input: any, config: any) => {
+        replacementCalls++
+        assert.equal(config.metadata.mcpSessionRetry, true)
+        return `fresh:${input.q}`
+      },
+    } as unknown as StructuredTool
+    ;(instance as any).reloadMcpServerToolPool = async (serverId: string) => {
+      reloadCalls++
+      assert.equal(serverId, 'gitnexus')
+      return [replacementTool]
+    }
+
+    const [wrapped] = (instance as any).wrapMcpTools('gitnexus', [originalTool]) as StructuredTool[]
+    const result = await (wrapped.invoke as any)({ q: 'hello' })
+
+    assert.equal(result, 'fresh:hello')
+    assert.equal(originalCalls, 1)
+    assert.equal(reloadCalls, 1)
+    assert.equal(replacementCalls, 1)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance does not retry MCP session invalidation more than once', async () => {
+  const instance = makeInstance()
+  try {
+    let reloadCalls = 0
+    const originalTool = {
+      name: 'query',
+      invoke: async () => {
+        throw new Error('No valid session. Send a POST to initialize.')
+      },
+    } as unknown as StructuredTool
+    ;(instance as any).reloadMcpServerToolPool = async () => {
+      reloadCalls++
+      return []
+    }
+
+    const [wrapped] = (instance as any).wrapMcpTools('gitnexus', [originalTool]) as StructuredTool[]
+    await assert.rejects(
+      () => (wrapped.invoke as any)({}, { metadata: { mcpSessionRetry: true } }),
+      /No valid session/
+    )
+
+    assert.equal(reloadCalls, 0)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
 test('BotInstance stop closes MCP tool clients', async () => {
   const instance = makeInstance()
   let closeCalls = 0

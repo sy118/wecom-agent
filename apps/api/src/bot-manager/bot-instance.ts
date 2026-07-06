@@ -30,6 +30,7 @@ const STREAM_TOOL_MSG = '🔍 正在检索相关信息...'
 const TYPEWRITER_INTERVAL_MS = 800
 const EMPTY_RESPONSE_FALLBACK = '抱歉，我暂时无法生成有效回复，请稍后重试。'
 const PROGRESS_HEARTBEAT_INTERVAL_MS = 5_000
+const MCP_SESSION_RETRY_FLAG = 'mcpSessionRetry'
 
 type ProgressPhase = 'thinking' | 'tool' | 'organizing'
 
@@ -42,6 +43,47 @@ function configuredPositiveInt(envKey: string): number | undefined {
 
 function safeReply(text: string): string {
   return text.trim() || EMPTY_RESPONSE_FALLBACK
+}
+
+function collectErrorText(error: unknown, seen = new Set<unknown>()): string {
+  if (error === null || error === undefined) return ''
+  if (seen.has(error)) return ''
+  if (typeof error !== 'object') return String(error)
+  seen.add(error)
+
+  const parts: string[] = []
+  if (error instanceof Error) {
+    parts.push(error.message)
+    if (error.cause) parts.push(collectErrorText(error.cause, seen))
+  }
+
+  const record = error as Record<string, unknown>
+  for (const key of ['message', 'body', 'response', 'cause']) {
+    if (key in record) parts.push(collectErrorText(record[key], seen))
+  }
+  return parts.filter(Boolean).join('\n')
+}
+
+function isMcpSessionInvalidError(error: unknown): boolean {
+  const text = collectErrorText(error).toLowerCase()
+  return text.includes('no valid session')
+    || (text.includes('session not found') && (text.includes('re-initialize') || text.includes('reinitialize')))
+}
+
+function hasRetriedMcpSession(config: unknown): boolean {
+  if (!config || typeof config !== 'object') return false
+  const metadata = (config as { metadata?: unknown }).metadata
+  return !!metadata
+    && typeof metadata === 'object'
+    && (metadata as Record<string, unknown>)[MCP_SESSION_RETRY_FLAG] === true
+}
+
+function withMcpSessionRetryMetadata(config: unknown): Record<string, unknown> {
+  const base = config && typeof config === 'object' ? { ...(config as Record<string, unknown>) } : {}
+  const metadata = base.metadata && typeof base.metadata === 'object' && !Array.isArray(base.metadata)
+    ? { ...(base.metadata as Record<string, unknown>) }
+    : {}
+  return { ...base, metadata: { ...metadata, [MCP_SESSION_RETRY_FLAG]: true } }
 }
 
 function contentText(content: string | IncomingContent[]): string {
@@ -151,6 +193,7 @@ export class BotInstance {
   private difyClient: DifyClient | null = null
   private toolPool = new Map<string, StructuredTool[]>() // mcpServerId → tools
   private toolClients = new Map<string, McpToolClient>()
+  private mcpReloadInFlight = new Map<string, Promise<StructuredTool[]>>()
   private skillToolPool = new Map<string, SkillDefinition>()
   private queues = new Map<string, MessageQueue>()
   private sessions: SessionStore
@@ -811,7 +854,7 @@ export class BotInstance {
       for (const server of mcpServers) {
         if (!server.enabled) continue
         try {
-          const toolClient = await createMcpToolClient(server)
+          const toolClient = await this.createTrackedMcpToolClient(server)
           this.toolPool.set(server.id, toolClient.tools)
           this.toolClients.set(server.id, toolClient)
         } catch (err) {
@@ -907,7 +950,7 @@ export class BotInstance {
     for (const server of mcpServers) {
       if (!server.enabled) continue
       try {
-        const toolClient = await createMcpToolClient(server)
+        const toolClient = await this.createTrackedMcpToolClient(server)
         nextToolPool.set(server.id, toolClient.tools)
         nextToolClients.set(server.id, toolClient)
       } catch (err) {
@@ -1427,6 +1470,72 @@ export class BotInstance {
     } finally {
       if (timeout) clearTimeout(timeout)
     }
+  }
+
+  private async createTrackedMcpToolClient(server: McpServerConfig): Promise<McpToolClient> {
+    const toolClient = await createMcpToolClient(server)
+    return {
+      ...toolClient,
+      tools: this.wrapMcpTools(server.id, toolClient.tools),
+    }
+  }
+
+  private wrapMcpTools(serverId: string, tools: StructuredTool[]): StructuredTool[] {
+    return tools.map((tool) => this.wrapMcpTool(serverId, tool))
+  }
+
+  private wrapMcpTool(serverId: string, tool: StructuredTool): StructuredTool {
+    const originalName = tool.name
+    const invokeWithRetry = async (input: unknown, config?: unknown) => {
+      try {
+        return await (tool.invoke as any).call(tool, input, config)
+      } catch (err) {
+        if (!isMcpSessionInvalidError(err) || hasRetriedMcpSession(config)) throw err
+
+        console.warn(`[BotInstance:${this.deps.bot.id}] MCP session expired for ${serverId}/${originalName}; reinitializing`)
+        const refreshedTools = await this.reloadMcpServerToolPool(serverId).catch((reloadErr) => {
+          console.error(`[BotInstance:${this.deps.bot.id}] Failed to reinitialize MCP server ${serverId}:`, reloadErr)
+          throw err
+        })
+        const replacement = refreshedTools.find((candidate) => candidate.name === originalName || candidate.name === tool.name)
+        if (!replacement) throw err
+        return (replacement.invoke as any).call(replacement, input, withMcpSessionRetryMetadata(config))
+      }
+    }
+
+    return new Proxy(tool as any, {
+      get(target, prop, receiver) {
+        if (prop === 'invoke' || prop === 'call') return invokeWithRetry
+        return Reflect.get(target, prop, receiver)
+      },
+    }) as StructuredTool
+  }
+
+  private async reloadMcpServerToolPool(serverId: string): Promise<StructuredTool[]> {
+    const inFlight = this.mcpReloadInFlight.get(serverId)
+    if (inFlight) return inFlight
+
+    const reload = this.reloadMcpServerToolPoolNow(serverId)
+    this.mcpReloadInFlight.set(serverId, reload)
+    try {
+      return await reload
+    } finally {
+      this.mcpReloadInFlight.delete(serverId)
+    }
+  }
+
+  private async reloadMcpServerToolPoolNow(serverId: string): Promise<StructuredTool[]> {
+    const server = this.deps.mcpServers.find((item) => item.id === serverId && item.enabled)
+    if (!server) throw new Error(`MCP server ${serverId} is not enabled`)
+
+    const previousClient = this.toolClients.get(serverId)
+    const toolClient = await this.createTrackedMcpToolClient(server)
+    this.toolPool.set(serverId, toolClient.tools)
+    this.toolClients.set(serverId, toolClient)
+    if (previousClient && previousClient !== toolClient) {
+      await this.closeMcpToolClients([previousClient])
+    }
+    return toolClient.tools
   }
 
   private async closeMcpToolClients(clients?: McpToolClient[]): Promise<void> {
