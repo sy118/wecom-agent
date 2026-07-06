@@ -5,6 +5,7 @@ import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/
 import { loadMcpTools } from '@langchain/mcp-adapters'
 import type { McpServerConfig } from '@wecom-platform/types'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import type { StructuredTool } from '@langchain/core/tools'
 
 const variablePattern = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
@@ -14,7 +15,7 @@ const DEFAULT_TOOL_TIMEOUT_MS = 180_000
 export interface McpToolClient {
   serverId: string
   serverName: string
-  tools: Awaited<ReturnType<typeof loadMcpTools>>
+  tools: StructuredTool[]
   close: () => Promise<void>
 }
 
@@ -141,7 +142,7 @@ export async function createMcpToolClient(
 }
 
 export async function createMcpTools(mcpServers: McpServerConfig[]) {
-  const allTools: Awaited<ReturnType<typeof loadMcpTools>> = []
+  const allTools: StructuredTool[] = []
 
   for (const server of mcpServers) {
     if (!server.enabled) continue
