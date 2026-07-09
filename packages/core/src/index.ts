@@ -5,6 +5,7 @@ export type { AgentEngineConfig, AgentProgressCallbacks } from './agent-engine.j
 export { DifyClient } from './dify-client.js'
 export type { DifyConfig, DifyChatResult } from './dify-client.js'
 export { MessageQueue } from './message-queue.js'
+export { AsyncLimiter } from './async-limiter.js'
 export {
   appendSkillPrompts,
   buildSkillPromptAdditions,

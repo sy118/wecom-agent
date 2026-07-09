@@ -149,31 +149,6 @@ importers:
         specifier: ^5.4.5
         version: 5.9.3
 
-  packages/wiki-mcp-server:
-    dependencies:
-      '@modelcontextprotocol/sdk':
-        specifier: ^1.29.0
-        version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@3.25.76)
-      express:
-        specifier: ^5.2.1
-        version: 5.2.1
-      simple-git:
-        specifier: ^3.27.0
-        version: 3.36.0
-      zod:
-        specifier: ^3.25.76
-        version: 3.25.76
-    devDependencies:
-      '@types/express':
-        specifier: ^5.0.6
-        version: 5.0.6
-      '@types/node':
-        specifier: ^20.0.0
-        version: 20.19.41
-      typescript:
-        specifier: ^5.4.5
-        version: 5.9.3
-
 packages:
 
   '@ant-design/colors@7.2.1':

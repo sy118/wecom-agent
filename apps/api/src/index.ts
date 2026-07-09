@@ -1,8 +1,9 @@
 import 'dotenv/config'
 import express from 'express'
 import cors from 'cors'
-import { mkdirSync } from 'fs'
-import { dirname } from 'path'
+import { existsSync, mkdirSync } from 'fs'
+import { dirname, resolve } from 'path'
+import { fileURLToPath } from 'url'
 import { initDb } from './db/client.js'
 import { BotRepository } from './db/bot-repository.js'
 import { botManager } from './bot-manager/bot-manager.js'
@@ -18,15 +19,25 @@ import { mcpServersRouter } from './routes/mcp-servers.js'
 import { skillsRouter } from './routes/skills.js'
 import { sessionsRouter } from './routes/sessions.js'
 import { createScheduledTasksRouter } from './routes/scheduled-tasks.js'
-import { wikiRouter } from './routes/wiki.js'
 import { wecomEventsRouter } from './routes/wecom-events.js'
 import { settingsRouter } from './routes/settings.js'
 import { wecomCommandConfigRouter } from './routes/wecom-command-config.js'
 import { generatedFilesRouter } from './routes/generated-files.js'
+import { AsyncLimiter } from '@wecom-platform/core'
 import type { BotConfig } from '@wecom-platform/types'
 
 const PORT = Number(process.env.API_PORT ?? 3000)
 const DB_PATH = process.env.DB_PATH ?? './data/wecom-platform.db'
+const WEB_DIST_DIR = process.env.WEB_DIST_DIR
+  ?? resolve(dirname(fileURLToPath(import.meta.url)), '../../web/dist')
+const WEB_INDEX_FILE = resolve(WEB_DIST_DIR, 'index.html')
+
+function configuredPositiveInt(envKey: string, fallback: number): number {
+  const raw = process.env[envKey]
+  if (!raw) return fallback
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
 
 async function main(): Promise<void> {
   mkdirSync(dirname(DB_PATH), { recursive: true })
@@ -61,8 +72,17 @@ async function main(): Promise<void> {
   app.use('/api/skills', authMiddleware, skillsRouter)
   app.use('/api/scheduled-tasks', authMiddleware, createScheduledTasksRouter(taskScheduler))
   app.use('/api/sessions', authMiddleware, sessionsRouter)
-  app.use('/api/wiki', authMiddleware, wikiRouter)
   app.use('/api/settings', authMiddleware, settingsRouter)
+
+  if (existsSync(WEB_INDEX_FILE)) {
+    app.use(express.static(WEB_DIST_DIR))
+    app.get(/^\/(?!api(?:\/|$)).*/, (_req, res) => {
+      res.sendFile(WEB_INDEX_FILE)
+    })
+    console.log(`[API] Serving web assets from ${WEB_DIST_DIR}`)
+  } else {
+    console.warn(`[API] Web assets not found at ${WEB_DIST_DIR}; serving API only.`)
+  }
 
   app.listen(PORT, () => {
     console.log(`[API] Server running on port ${PORT}`)
@@ -107,14 +127,15 @@ async function autoStartBots(bots: BotConfig[]): Promise<void> {
     return
   }
   console.log(`[API] Auto-starting ${bots.length} bot(s)...`)
-  for (const bot of bots) {
+  const limiter = new AsyncLimiter(configuredPositiveInt('BOT_AUTO_START_CONCURRENCY', 3))
+  await Promise.all(bots.map((bot) => limiter.run(async () => {
     try {
       await botManager.start(bot.id)
       console.log(`[API] Auto-started bot: ${bot.name} (${bot.id})`)
     } catch (err) {
       console.error(`[API] Failed to auto-start bot ${bot.id}:`, err)
     }
-  }
+  })))
 }
 
 main().catch((err) => {

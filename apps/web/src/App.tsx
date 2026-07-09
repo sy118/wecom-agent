@@ -7,7 +7,6 @@ import McpServersPage from './pages/McpServersPage.js'
 import SkillsPage from './pages/SkillsPage.js'
 import SessionsPage from './pages/SessionsPage.js'
 import ScheduledTasksPage from './pages/ScheduledTasksPage.js'
-import WikiPage from './pages/WikiPage.js'
 import SettingsPage from './pages/SettingsPage.js'
 import WecomCommandConfigPage from './pages/WecomCommandConfigPage.js'
 import AppLayout from './components/AppLayout.js'
@@ -30,7 +29,6 @@ export default function App() {
           <Route path="mcp-servers" element={<McpServersPage />} />
           <Route path="skills" element={<SkillsPage />} />
           <Route path="scheduled-tasks" element={<ScheduledTasksPage />} />
-          <Route path="wiki" element={<WikiPage />} />
           <Route path="wecom-command-config" element={<WecomCommandConfigPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="sessions" element={<SessionsPage />} />

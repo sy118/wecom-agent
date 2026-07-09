@@ -132,7 +132,7 @@ test('MCP server API validates and normalizes transport-specific payloads', asyn
       env: { IGNORED: 'ignored' },
       headers: { Authorization: 'Bearer ${YUQUE_MCP_TOKEN}' },
       paramSchema: [
-        { key: 'namespace', label: '知识库', type: 'string', description: '默认知识库' },
+        { key: 'project', label: '项目', type: 'string', description: '默认项目' },
       ],
     }),
   })
@@ -143,6 +143,6 @@ test('MCP server API validates and normalizes transport-specific payloads', asyn
   assert.deepEqual(created.body.env, {})
   assert.deepEqual(created.body.headers, { Authorization: 'Bearer ${YUQUE_MCP_TOKEN}' })
   assert.deepEqual(created.body.paramSchema, [
-    { key: 'namespace', label: '知识库', type: 'string', description: '默认知识库' },
+    { key: 'project', label: '项目', type: 'string', description: '默认项目' },
   ])
 })

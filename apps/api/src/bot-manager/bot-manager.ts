@@ -10,10 +10,15 @@ import type { BotStatus, BotStatusEvent, ContextConfig, GeneratedFile, IncomingE
 
 export class BotManager extends EventEmitter {
   private instances = new Map<string, BotInstance>()
+  private lifecycleLocks = new Map<string, Promise<void>>()
   private mcpRefreshInFlight: Promise<void> | null = null
   private mcpRefreshPending = false
 
   async start(botId: string): Promise<void> {
+    return this.runLifecycle(botId, () => this.startNow(botId))
+  }
+
+  private async startNow(botId: string): Promise<void> {
     if (this.instances.has(botId)) {
       throw new Error(`Bot ${botId} is already running`)
     }
@@ -41,6 +46,10 @@ export class BotManager extends EventEmitter {
   }
 
   async stop(botId: string): Promise<void> {
+    return this.runLifecycle(botId, () => this.stopNow(botId))
+  }
+
+  private async stopNow(botId: string): Promise<void> {
     const instance = this.instances.get(botId)
     if (!instance) return
 
@@ -51,9 +60,24 @@ export class BotManager extends EventEmitter {
   }
 
   async restart(botId: string): Promise<void> {
-    if (!this.instances.has(botId)) return
-    await this.stop(botId)
-    await this.start(botId)
+    return this.runLifecycle(botId, async () => {
+      if (!this.instances.has(botId)) return
+      await this.stopNow(botId)
+      await this.startNow(botId)
+    })
+  }
+
+  private async runLifecycle(botId: string, action: () => Promise<void>): Promise<void> {
+    const previous = this.lifecycleLocks.get(botId) ?? Promise.resolve()
+    const run = previous.catch(() => {}).then(action)
+    const lock = run.then(() => {}, () => {})
+    this.lifecycleLocks.set(botId, lock)
+    lock.finally(() => {
+      if (this.lifecycleLocks.get(botId) === lock) {
+        this.lifecycleLocks.delete(botId)
+      }
+    })
+    return run
   }
 
   isRunning(botId: string): boolean {
