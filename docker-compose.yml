@@ -1,6 +1,6 @@
 services:
   app:
-    image: wecom-agent
+    image: ${DOCKER_IMAGE:-registry.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent}:${DOCKER_TAG:-latest}
     build:
       context: .
       dockerfile: apps/api/Dockerfile

@@ -18,7 +18,7 @@
 - Web: React, Vite, Ant Design, React Router, Axios
 - Agent: LangChain, LangGraph, OpenAI-compatible, Anthropic, Dify
 - 工具扩展: Model Context Protocol SDK, SSE, stdio, Streamable HTTP
-- 部署: Docker Compose，单个 `wecom-agent` 镜像内由 Express 同时托管 API 和 Web 静态资源
+- 部署: Docker Compose，单个 `registry.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent` 镜像内由 Express 同时托管 API 和 Web 静态资源
 
 ## 项目结构
 
@@ -75,7 +75,7 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-Compose 会构建并运行镜像 `wecom-agent`，默认访问：
+Compose 会构建并运行镜像 `registry.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent:${DOCKER_TAG:-latest}`，默认访问：
 
 - Web 控制台: http://localhost:5173
 - 容器内 API: `app:3000`
@@ -88,6 +88,16 @@ docker compose down
 ```
 
 Docker 使用 `api-data` volume 保存 SQLite 数据库。
+
+推送到阿里云 Container Registry：
+
+```bash
+docker login --username=15187401260 registry.cn-hangzhou.aliyuncs.com
+docker compose --env-file .env.example build
+docker push registry.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent:${DOCKER_TAG:-latest}
+```
+
+如果在阿里云 ECS 的 VPC 内推送，可将 `DOCKER_IMAGE` 改为 `registry-vpc.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent`，并登录对应 registry 域名。
 
 ## 控制台配置流程
 
@@ -114,6 +124,8 @@ Docker 使用 `api-data` volume 保存 SQLite 数据库。
 | `WEB_HOST` | Web 本地开发监听地址 | `127.0.0.1` |
 | `SKILL_SCRIPTS_ENABLED` | 是否允许执行脚本型 Skill | `false` |
 | `NODE_IMAGE` | Docker 构建使用的 Node 基础镜像 | `ca7kangnvcl9wf.xuanyuan.run/library/node:20-alpine` |
+| `DOCKER_IMAGE` | 应用镜像仓库地址 | `registry.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent` |
+| `DOCKER_TAG` | 应用镜像版本号 | `latest` |
 | `BOT_AUTO_START_CONCURRENCY` | 服务启动时自动启动 Bot 的并发上限 | `3` |
 | `BOT_MESSAGE_CONCURRENCY` | Bot 跨会话消息处理并发上限 | `4` |
 | `BOT_QUEUE_BACKPRESSURE_LIMIT` | 单会话队列积压上限 | `10` |
