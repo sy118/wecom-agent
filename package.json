@@ -6,12 +6,9 @@
   "scripts": {
     "dev:api": "pnpm --filter @wecom-platform/api dev",
     "dev:web": "pnpm --filter @wecom-platform/web dev",
-    "dev:wiki-mcp": "pnpm --filter @wecom-platform/wiki-mcp-server dev",
-    "build": "pnpm --filter @wecom-platform/types build && pnpm --filter @wecom-platform/core build && pnpm --filter @wecom-platform/api build && pnpm --filter @wecom-platform/web build && pnpm --filter @wecom-platform/wiki-mcp-server build",
+    "build": "pnpm --filter @wecom-platform/types build && pnpm --filter @wecom-platform/core build && pnpm --filter @wecom-platform/api build && pnpm --filter @wecom-platform/web build",
     "build:api": "pnpm --filter @wecom-platform/api build",
     "build:web": "pnpm --filter @wecom-platform/web build",
-    "build:wiki-mcp": "pnpm --filter @wecom-platform/wiki-mcp-server build",
-    "wiki-mcp": "pnpm --filter @wecom-platform/wiki-mcp-server start",
     "test": "pnpm build && node --test packages/core/dist/**/*.test.js apps/api/dist/**/*.test.js"
   },
   "keywords": [],

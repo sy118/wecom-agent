@@ -2,11 +2,10 @@ import { randomUUID } from 'crypto'
 import { readFile } from 'fs/promises'
 import type { Client } from '@libsql/client'
 import type { StructuredTool } from '@langchain/core/tools'
-import { AgentEngine, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpToolClient, createSkillTools } from '@wecom-platform/core'
+import { AgentEngine, AsyncLimiter, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpToolClient, createSkillTools } from '@wecom-platform/core'
 import type { McpToolClient } from '@wecom-platform/core'
 import { SessionStore } from '../session-store.js'
 import { SkillAuditRepository } from '../db/skill-audit-repository.js'
-import { WikiRetrievalLogRepository } from '../db/wiki-retrieval-log-repository.js'
 import { BotResponseRunRepository } from '../db/bot-response-run-repository.js'
 import { AnnotationAnswerRepository } from '../db/annotation-answer-repository.js'
 import { ActiveContextRepository, CommandPermissionRepository, ContextAccessRepository, WecomUserRepository } from '../db/wecom-access-repository.js'
@@ -22,7 +21,8 @@ import type { WecomCommandActor, WecomCommandHandlerResult, WecomCommandRuntime 
 import type { ParsedWecomCommand } from '../commands/wecom-command-parser.js'
 import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, IncomingEvent, Session, SessionMessage, BotResponseRun, GeneratedFile, WecomMediaType, WecomUserRole, WecomUserStatus } from '@wecom-platform/types'
 
-const QUEUE_BACKPRESSURE_LIMIT = 10
+const QUEUE_BACKPRESSURE_LIMIT = configuredPositiveInt('BOT_QUEUE_BACKPRESSURE_LIMIT') ?? 10
+const messageProcessingLimiter = new AsyncLimiter(configuredPositiveInt('BOT_MESSAGE_CONCURRENCY') ?? 4)
 const BUSY_MESSAGE = '当前处理队列繁忙，请稍后再试'
 const RECONNECTING_MESSAGE = '机器人正在重连，请稍后再试'
 const THINKING_MESSAGE = '🤔 正在分析，请稍候...'
@@ -1023,7 +1023,7 @@ export class BotInstance {
 
   async handleEvent(event: IncomingEvent): Promise<void> {
     try {
-      await handleIncomingWecomEvent(event, { botId: this.deps.bot.id, contexts: this.deps.contexts })
+      await handleIncomingWecomEvent(event, { botId: this.deps.bot.id })
     } catch (err) {
       console.error(`[BotInstance:${this.deps.bot.id}] Failed to handle WeCom event ${event.eventType}:`, err)
     }
@@ -1190,56 +1190,53 @@ export class BotInstance {
     const frame = (msg as any)._frame
 
     queue.enqueue(async () => {
-      if (this.adapter.isReconnecting()) {
-        await this.adapter.sendMessage(chatId, RECONNECTING_MESSAGE).catch(() => {})
-        return
-      }
-
-      const session = await this.sessions.getOrCreate(chatKey, context.id, context.sessionTtlMin)
-      const { streamingMode } = this.deps.bot
-      const responseRun = await this.createResponseRun(context, session, chatKey, chatId, msg.userId, content)
-      const annotation = await this.findAnnotationAnswer(context, content)
-      if (annotation) {
-        await AnnotationAnswerRepository.recordHit(annotation.id)
-        const answer = safeReply(annotation.answer)
-        await this.saveMessages(chatKey, content, answer, responseRun.id)
-        await BotResponseRunRepository.markSent(responseRun.id, answer)
-        await this.sendTrackedStaticReply(chatId, answer, responseRun, frame)
-        return
-      }
-
-      if (this.deps.bot.provider === 'dify') {
-        if (shouldSkipRuntimeToolsForDify(this.deps.bot.provider, context.mcpConfigs ?? [], context.skillConfigs ?? [])) {
-          console.log(`[BotInstance:${this.deps.bot.id}] Dify provider skips MCP/Skill runtime tools`)
+      await messageProcessingLimiter.run(async () => {
+        if (this.adapter.isReconnecting()) {
+          await this.adapter.sendMessage(chatId, RECONNECTING_MESSAGE).catch(() => {})
+          return
         }
-        if (streamingMode === 'none') {
-          await this.handleDify(chatId, chatKey, content, session.difyConversationId ?? null, undefined, frame, responseRun)
+
+        const session = await this.sessions.getOrCreate(chatKey, context.id, context.sessionTtlMin)
+        const { streamingMode } = this.deps.bot
+        const responseRun = await this.createResponseRun(context, session, chatKey, chatId, msg.userId, content)
+        const annotation = await this.findAnnotationAnswer(context, content)
+        if (annotation) {
+          await AnnotationAnswerRepository.recordHit(annotation.id)
+          const answer = safeReply(annotation.answer)
+          await this.saveMessages(chatKey, content, answer, responseRun.id)
+          await BotResponseRunRepository.markSent(responseRun.id, answer)
+          await this.sendTrackedStaticReply(chatId, answer, responseRun, frame)
+          return
+        }
+
+        if (this.deps.bot.provider === 'dify') {
+          if (shouldSkipRuntimeToolsForDify(this.deps.bot.provider, context.mcpConfigs ?? [], context.skillConfigs ?? [])) {
+            console.log(`[BotInstance:${this.deps.bot.id}] Dify provider skips MCP/Skill runtime tools`)
+          }
+          if (streamingMode === 'none') {
+            await this.handleDify(chatId, chatKey, content, session.difyConversationId ?? null, undefined, frame, responseRun)
+          } else {
+            await this.handleDifyStreaming(chatId, chatKey, content, session.difyConversationId ?? null, frame, responseRun)
+          }
+          return
+        }
+
+        const mcpTools = this.resolveTools(context.mcpConfigs ?? [])
+        const skillContext = this.createSkillRuntimeContext(context.id, chatKey, content)
+        const skillTools = this.resolveSkillTools(context.skillConfigs ?? [], skillContext)
+        const tools = this.mergeTools(mcpTools, skillTools)
+        let systemPrompt = injectAllowedProjects(context.systemPrompt, context.mcpConfigs ?? [])
+        systemPrompt = appendSkillPrompts(systemPrompt, buildSkillPromptAdditions([...this.skillToolPool.values()], context.skillConfigs ?? [], content))
+        const promptWithForcedResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content)
+
+        if (streamingMode === 'progressive') {
+          await this.handleProgressive(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
+        } else if (streamingMode === 'typewriter') {
+          await this.handleTypewriter(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
         } else {
-          await this.handleDifyStreaming(chatId, chatKey, content, session.difyConversationId ?? null, frame, responseRun)
+          await this.handleNone(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
         }
-        return
-      }
-
-      const mcpTools = this.resolveTools(context.mcpConfigs ?? [])
-      const skillContext = this.createSkillRuntimeContext(context.id, chatKey, content)
-      const skillTools = this.resolveSkillTools(context.skillConfigs ?? [], skillContext)
-      const tools = this.mergeTools(mcpTools, skillTools)
-      let systemPrompt = injectAllowedProjects(context.systemPrompt, context.mcpConfigs ?? [])
-      systemPrompt = injectWikiNamespace(systemPrompt, context.mcpConfigs ?? [])
-      systemPrompt = appendSkillPrompts(systemPrompt, buildSkillPromptAdditions([...this.skillToolPool.values()], context.skillConfigs ?? [], content))
-      const promptWithForcedResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content, {
-        contextId: context.id,
-        chatKey,
-        responseRunId: responseRun.id,
       })
-
-      if (streamingMode === 'progressive') {
-        await this.handleProgressive(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
-      } else if (streamingMode === 'typewriter') {
-        await this.handleTypewriter(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
-      } else {
-        await this.handleNone(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
-      }
     })
   }
 
@@ -1273,7 +1270,7 @@ export class BotInstance {
     if (!question.trim()) return null
     return AnnotationAnswerRepository.findMatch(question, {
       contextId: context.id,
-      namespace: firstWikiNamespaceFromConfigs(context.mcpConfigs ?? []),
+      namespace: null,
     })
   }
 
@@ -1547,8 +1544,7 @@ export class BotInstance {
   private async executeForceCallMcps(
     systemPrompt: string,
     mcpConfigs: McpConfig[],
-    content: string | IncomingContent[],
-    runtimeMeta: { contextId?: string; chatKey?: string; responseRunId?: string } = {}
+    content: string | IncomingContent[]
   ): Promise<string> {
     const results: string[] = []
     const FORCE_CALL_TIMEOUT_MS = 55_000
@@ -1561,92 +1557,7 @@ export class BotInstance {
       const serverTools = this.toolPool.get(cfg.mcpServerId)
       if (!serverTools?.length) continue
 
-      const findTool = (name: string) => serverTools.find((tool) => tool.name === name || tool.name.endsWith(`_${name}`))
-      const policy = cfg.params?.retrievalPolicy as string | undefined
-      const forceCallPage = cfg.params?.forceCallPage as string | undefined
-      const nsParam = cfg.params?.namespace
-      const namespace = Array.isArray(nsParam) ? nsParam[0] as string | undefined : nsParam as string | undefined
-      const shouldForce = Boolean(cfg.forceCall || policy === 'autoSearch' || policy === 'fixedPage' || forceCallPage)
-      if (!shouldForce) continue
-
-      if (policy === 'manual') continue
-
-      if (policy === 'fixedPage' || forceCallPage) {
-        const wikiReadTool = findTool('wiki_read')
-        if (wikiReadTool) {
-          const startedAt = Date.now()
-          try {
-            const output = await this.invokeWithTimeout(wikiReadTool, {
-              path: forceCallPage,
-              namespace,
-              max_chars: Number(cfg.params?.maxChars ?? 6000),
-            }, FORCE_CALL_TIMEOUT_MS)
-            const textOutput = typeof output === 'string' ? output : JSON.stringify(output)
-            await this.recordWikiRetrieval({
-              namespace,
-              policy: 'fixedPage',
-              query: forceCallPage ?? '',
-              hitCount: isWikiReadHit(textOutput) ? 1 : 0,
-              hitPaths: forceCallPage && isWikiReadHit(textOutput) ? [forceCallPage] : [],
-              durationMs: Date.now() - startedAt,
-              ...runtimeMeta,
-            })
-            results.push(`[wiki_read: ${forceCallPage}]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
-          } catch (err) {
-            console.error(`[BotInstance:${this.deps.bot.id}] Force-call wiki_read failed:`, err)
-            await this.recordWikiRetrieval({
-              namespace,
-              policy: 'fixedPage',
-              query: forceCallPage ?? '',
-              hitCount: 0,
-              hitPaths: [],
-              durationMs: Date.now() - startedAt,
-              error: err instanceof Error ? err.message : String(err),
-              ...runtimeMeta,
-            })
-          }
-          continue
-        }
-      }
-
-      if (policy === 'autoSearch' || findTool('wiki_search')) {
-        const wikiSearchTool = findTool('wiki_search')
-        if (wikiSearchTool) {
-          const startedAt = Date.now()
-          try {
-            const output = await this.invokeWithTimeout(wikiSearchTool, {
-              query,
-              namespace,
-              cross_ns: Boolean(cfg.params?.crossNs),
-            }, FORCE_CALL_TIMEOUT_MS)
-            const textOutput = typeof output === 'string' ? output : JSON.stringify(output)
-            const hits = extractWikiSearchHits(textOutput)
-            await this.recordWikiRetrieval({
-              namespace,
-              policy: 'autoSearch',
-              query,
-              hitCount: hits.hitCount,
-              hitPaths: hits.hitPaths,
-              durationMs: Date.now() - startedAt,
-              ...runtimeMeta,
-            })
-            results.push(`[wiki_search]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
-          } catch (err) {
-            console.error(`[BotInstance:${this.deps.bot.id}] Force-call wiki_search failed:`, err)
-            await this.recordWikiRetrieval({
-              namespace,
-              policy: 'autoSearch',
-              query,
-              hitCount: 0,
-              hitPaths: [],
-              durationMs: Date.now() - startedAt,
-              error: err instanceof Error ? err.message : String(err),
-              ...runtimeMeta,
-            })
-          }
-          continue
-        }
-      }
+      if (!cfg.forceCall) continue
 
       for (const tool of serverTools) {
         const shape = (tool as any).schema?.shape
@@ -1662,38 +1573,6 @@ export class BotInstance {
 
     if (results.length === 0) return systemPrompt
     return `${systemPrompt}\n\n# 强制检索结果\n\n${results.join('\n\n')}`
-  }
-
-  private async recordWikiRetrieval(data: {
-    namespace?: string
-    policy: string
-    query: string
-    hitCount: number
-    hitPaths: string[]
-    durationMs: number
-    error?: string
-    contextId?: string
-    chatKey?: string
-    responseRunId?: string
-  }): Promise<void> {
-    if (!data.namespace) return
-    try {
-      await WikiRetrievalLogRepository.create({
-        botId: this.deps.bot.id,
-        contextId: data.contextId ?? null,
-        chatKey: data.chatKey ?? null,
-        responseRunId: data.responseRunId ?? null,
-        namespace: data.namespace,
-        policy: data.policy,
-        query: data.query,
-        hitCount: data.hitCount,
-        hitPaths: data.hitPaths,
-        durationMs: data.durationMs,
-        error: data.error ?? null,
-      })
-    } catch (err) {
-      console.error(`[BotInstance:${this.deps.bot.id}] Failed to record Wiki retrieval log:`, err)
-    }
   }
 
   private async handleNone(
@@ -1973,40 +1852,6 @@ export class BotInstance {
   }
 }
 
-function injectWikiNamespace(systemPrompt: string, mcpConfigs: McpConfig[]): string {
-  const namespaces: string[] = []
-  for (const cfg of mcpConfigs) {
-    if (!cfg.enabled) continue
-    const ns = cfg.params?.namespace
-    if (!ns) continue
-    if (Array.isArray(ns)) namespaces.push(...ns)
-    else if (typeof ns === 'string') namespaces.push(ns)
-  }
-  if (namespaces.length === 0) return systemPrompt
-
-  const nsText = namespaces.length === 1
-    ? `当前绑定的 Wiki namespace: ${namespaces[0]}\n当你需要查询相关知识时，使用 wiki_read、wiki_search 等工具，默认在 namespace "${namespaces[0]}" 中查询。`
-    : `当前绑定的 Wiki namespaces: ${namespaces.join(', ')}\n当你需要查询相关知识时，使用 wiki_read、wiki_search 等工具，可查询这些 namespace。`
-
-  const marker = '## Wiki 知识库'
-  if (systemPrompt.includes(marker)) return systemPrompt
-  return `${systemPrompt}\n\n## Wiki 知识库\n${nsText}`
-}
-
-function firstWikiNamespaceFromConfigs(mcpConfigs: McpConfig[]): string | null {
-  for (const cfg of mcpConfigs) {
-    if (!cfg.enabled) continue
-    const ns = cfg.params?.namespace
-    if (Array.isArray(ns)) {
-      const first = ns.find((item): item is string => typeof item === 'string' && Boolean(item))
-      if (first) return first
-    } else if (typeof ns === 'string' && ns) {
-      return ns
-    }
-  }
-  return null
-}
-
 function wecomMediaTypeForGeneratedFile(file: GeneratedFile): WecomMediaType {
   if (file.fileType === 'image' || file.mimeType?.startsWith('image/')) return 'image'
   return 'file'
@@ -2062,21 +1907,6 @@ function formatWecomRole(role: WecomUserRole): string {
   if (role === 'admin') return '超级管理员'
   if (role === 'manager') return '管理员'
   return '普通用户'
-}
-
-function isWikiReadHit(output: string): boolean {
-  const normalized = output.trim()
-  if (!normalized) return false
-  return !/页面不存在|错误:|not found|error/i.test(normalized)
-}
-
-function extractWikiSearchHits(output: string): { hitCount: number; hitPaths: string[] } {
-  if (!output.trim() || output.includes('未找到匹配页面')) return { hitCount: 0, hitPaths: [] }
-  const hitPaths = [...output.matchAll(/\[[^\]]+\]\s+.+?\(([^)]+\.md)\)/g)]
-    .map((match) => match[1])
-    .filter((path): path is string => Boolean(path))
-  if (hitPaths.length > 0) return { hitCount: hitPaths.length, hitPaths: [...new Set(hitPaths)] }
-  return { hitCount: 1, hitPaths: [] }
 }
 
 function injectAllowedProjects(systemPrompt: string, mcpConfigs: McpConfig[]): string {

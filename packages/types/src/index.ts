@@ -288,26 +288,6 @@ export interface BotResponseRun {
   updatedAt: number
 }
 
-export type WikiFeedbackStatus = 'new' | 'triaged' | 'drafted' | 'resolved' | 'ignored' | 'unlinked'
-export type WikiFeedbackClassification = 'positive' | 'knowledge_gap' | 'retrieval_issue' | 'model_or_tool_issue' | 'ignored' | 'unclassified'
-
-export interface WikiFeedbackItem {
-  id: string
-  eventId: string
-  responseRunId: string | null
-  namespace: string | null
-  feedbackType: number | null
-  content: string | null
-  inaccurateReasons: number[]
-  classification: WikiFeedbackClassification
-  status: WikiFeedbackStatus
-  assignedTargetPath: string | null
-  draftId: string | null
-  resolutionNote: string | null
-  createdAt: number
-  updatedAt: number
-}
-
 export interface AnnotationAnswer {
   id: string
   question: string

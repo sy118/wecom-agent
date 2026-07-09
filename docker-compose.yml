@@ -1,56 +1,26 @@
 services:
-  api:
+  app:
+    image: wecom-agent
     build:
       context: .
       dockerfile: apps/api/Dockerfile
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-ca7kangnvcl9wf.xuanyuan.run/library/node:20-alpine}
     restart: always
     environment:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
       - DB_PATH=/data/wecom-platform.db
       - API_PORT=3000
-      - WIKI_ROOT=/data/wiki
-      - WIKI_MCP_URL=http://wiki-mcp:3001
-    depends_on:
-      - wiki-mcp
+      - WEB_DIST_DIR=/app/apps/web/dist
+      - BOT_AUTO_START_CONCURRENCY=${BOT_AUTO_START_CONCURRENCY:-3}
+      - BOT_MESSAGE_CONCURRENCY=${BOT_MESSAGE_CONCURRENCY:-4}
+      - BOT_QUEUE_BACKPRESSURE_LIMIT=${BOT_QUEUE_BACKPRESSURE_LIMIT:-10}
+      - GENERATION_TASK_CONCURRENCY=${GENERATION_TASK_CONCURRENCY:-2}
     volumes:
       - api-data:/data
-      - wiki-data:/data/wiki
-    expose:
-      - "3000"
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  web:
-    build:
-      context: .
-      dockerfile: apps/web/Dockerfile
-    restart: always
     ports:
-      - "${WEB_PORT:-8080}:80"
-    depends_on:
-      - api
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-
-  wiki-mcp:
-    build:
-      context: .
-      dockerfile: packages/wiki-mcp-server/Dockerfile
-    restart: always
-    environment:
-      - WIKI_ROOT=/data/wiki
-      - WIKI_MCP_PORT=3001
-    volumes:
-      - wiki-data:/data/wiki
-    ports:
-      - "${WIKI_MCP_PORT:-3001}:3001"
+      - "${WEB_PORT:-5173}:3000"
     logging:
       driver: json-file
       options:
@@ -59,4 +29,3 @@ services:
 
 volumes:
   api-data:
-  wiki-data:

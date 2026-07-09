@@ -12,7 +12,6 @@ process.env.DB_PATH = join(tempDir, 'bot-instance-test.db')
 const [
   botInstanceModule,
   { db, initDb },
-  { WikiRetrievalLogRepository },
   { BotRepository },
   { ContextRepository },
   { ActiveContextRepository, CommandPermissionRepository, ContextAccessRepository, WecomUserRepository },
@@ -22,7 +21,6 @@ const [
 ] = await Promise.all([
   import('./bot-instance.js'),
   import('../db/client.js'),
-  import('../db/wiki-retrieval-log-repository.js'),
   import('../db/bot-repository.js'),
   import('../db/context-repository.js'),
   import('../db/wecom-access-repository.js'),
@@ -1256,144 +1254,62 @@ test('BotInstance marks response run errors when reply generation fails', async 
   }
 })
 
-test('BotInstance force-calls Wiki autoSearch policy with namespace', async () => {
+test('BotInstance force-calls enabled MCP tools with query schemas', async () => {
   const instance = makeInstance()
   try {
     const calls: any[] = []
-    ;(instance as any).toolPool.set('wiki-mcp', [
+    ;(instance as any).toolPool.set('search-mcp', [
       {
-        name: 'wiki_search',
+        name: 'search_docs',
+        schema: { shape: { query: {} } },
         invoke: async (input: any) => {
           calls.push(input)
-          return '[product] Refund (faq/refund.md)\nmatched refund.md'
+          return 'matched refund policy'
         },
       },
     ])
 
     const prompt = await (instance as any).executeForceCallMcps('base prompt', [
       {
-        mcpServerId: 'wiki-mcp',
+        mcpServerId: 'search-mcp',
         enabled: true,
         forceCall: true,
-        params: { namespace: 'product', retrievalPolicy: 'autoSearch' },
-      },
-    ], 'refund policy', { contextId: 'context-1', chatKey: 'wecom:group:test', responseRunId: 'run-1' })
-
-    assert.equal(calls.length, 1)
-    assert.deepEqual(calls[0], { query: 'refund policy', namespace: 'product', cross_ns: false })
-    assert.match(prompt, /matched refund\.md/)
-    const logs = await WikiRetrievalLogRepository.findByNamespace('product', { limit: 10 })
-    assert.equal(logs.some((log) =>
-      log.policy === 'autoSearch' &&
-      log.query === 'refund policy' &&
-      log.responseRunId === 'run-1' &&
-      log.hitCount === 1 &&
-      log.hitPaths.includes('faq/refund.md')
-    ), true)
-  } finally {
-    ;(instance as any).sessions.destroy()
-  }
-})
-
-test('BotInstance force-calls Wiki fixedPage policy with max chars', async () => {
-  const instance = makeInstance()
-  try {
-    const calls: any[] = []
-    ;(instance as any).toolPool.set('wiki-mcp', [
-      {
-        name: 'wiki_read',
-        invoke: async (input: any) => {
-          calls.push(input)
-          return '# SOP'
-        },
-      },
-    ])
-
-    const prompt = await (instance as any).executeForceCallMcps('base prompt', [
-      {
-        mcpServerId: 'wiki-mcp',
-        enabled: true,
-        params: { namespace: 'product', retrievalPolicy: 'fixedPage', forceCallPage: 'rules/sop.md', maxChars: 1200 },
-      },
-    ], 'hello')
-
-    assert.equal(calls.length, 1)
-    assert.deepEqual(calls[0], { path: 'rules/sop.md', namespace: 'product', max_chars: 1200 })
-    assert.match(prompt, /# SOP/)
-    const logs = await WikiRetrievalLogRepository.findByNamespace('product', { limit: 10 })
-    assert.equal(logs.some((log) =>
-      log.policy === 'fixedPage' &&
-      log.query === 'rules/sop.md' &&
-      log.hitCount === 1 &&
-      log.hitPaths.includes('rules/sop.md')
-    ), true)
-  } finally {
-    ;(instance as any).sessions.destroy()
-  }
-})
-
-test('BotInstance keeps reply flow when Wiki retrieval logging fails', async () => {
-  const instance = makeInstance()
-  const originalCreate = WikiRetrievalLogRepository.create
-  try {
-    ;(WikiRetrievalLogRepository as any).create = async () => {
-      throw new Error('log write failed')
-    }
-    ;(instance as any).toolPool.set('wiki-mcp', [
-      {
-        name: 'wiki_search',
-        invoke: async () => '[support] SOP (rules/sop.md)\nmatched sop.md',
-      },
-    ])
-
-    const prompt = await (instance as any).executeForceCallMcps('base prompt', [
-      {
-        mcpServerId: 'wiki-mcp',
-        enabled: true,
-        forceCall: true,
-        params: { namespace: 'support', retrievalPolicy: 'autoSearch' },
-      },
-    ], 'sop')
-
-    assert.match(prompt, /matched sop\.md/)
-  } finally {
-    ;(WikiRetrievalLogRepository as any).create = originalCreate
-    ;(instance as any).sessions.destroy()
-  }
-})
-
-test('BotInstance skips Wiki manual policy force results', async () => {
-  const instance = makeInstance()
-  try {
-    ;(instance as any).toolPool.set('wiki-mcp', [
-      { name: 'wiki_search', invoke: async () => 'should not run' },
-    ])
-
-    const prompt = await (instance as any).executeForceCallMcps('base prompt', [
-      {
-        mcpServerId: 'wiki-mcp',
-        enabled: true,
-        params: { namespace: 'product', retrievalPolicy: 'manual' },
-      },
-    ], 'hello')
-
-    assert.equal(prompt, 'base prompt')
-  } finally {
-    ;(instance as any).sessions.destroy()
-  }
-})
-
-test('BotInstance keeps original prompt when Wiki MCP tools are unavailable', async () => {
-  const instance = makeInstance()
-  try {
-    const prompt = await (instance as any).executeForceCallMcps('base prompt', [
-      {
-        mcpServerId: 'wiki-mcp',
-        enabled: true,
-        params: { namespace: 'product', retrievalPolicy: 'autoSearch' },
+        params: {},
       },
     ], 'refund policy')
 
+    assert.equal(calls.length, 1)
+    assert.deepEqual(calls[0], { query: 'refund policy' })
+    assert.match(prompt, /matched refund policy/)
+  } finally {
+    ;(instance as any).sessions.destroy()
+  }
+})
+
+test('BotInstance skips MCP force call when forceCall is disabled', async () => {
+  const instance = makeInstance()
+  try {
+    const calls: any[] = []
+    ;(instance as any).toolPool.set('search-mcp', [
+      {
+        name: 'search_docs',
+        schema: { shape: { query: {} } },
+        invoke: async (input: unknown) => {
+          calls.push(input)
+          return 'should not run'
+        },
+      },
+    ])
+
+    const prompt = await (instance as any).executeForceCallMcps('base prompt', [
+      {
+        mcpServerId: 'search-mcp',
+        enabled: true,
+        params: {},
+      },
+    ], 'hello')
+
+    assert.equal(calls.length, 0)
     assert.equal(prompt, 'base prompt')
   } finally {
     ;(instance as any).sessions.destroy()

@@ -14,6 +14,7 @@ export async function initDb(): Promise<void> {
   await db.executeMultiple(`
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
+    PRAGMA busy_timeout = 5000;
 
     CREATE TABLE IF NOT EXISTS bots (
       id TEXT PRIMARY KEY,
@@ -147,51 +148,6 @@ export async function initDb(): Promise<void> {
       updated_at INTEGER NOT NULL
     );
 
-    CREATE TABLE IF NOT EXISTS wiki_namespaces (
-      id TEXT PRIMARY KEY,
-      name TEXT NOT NULL UNIQUE,
-      display_name TEXT NOT NULL,
-      path TEXT NOT NULL,
-      description TEXT,
-      git_enabled INTEGER NOT NULL DEFAULT 1,
-      auto_compile INTEGER NOT NULL DEFAULT 0,
-      compile_schedule TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wiki_knowledge_drafts (
-      id TEXT PRIMARY KEY,
-      namespace TEXT NOT NULL,
-      target_path TEXT NOT NULL,
-      content TEXT NOT NULL,
-      source_type TEXT NOT NULL DEFAULT 'manual',
-      source_ref TEXT,
-      status TEXT NOT NULL DEFAULT 'pending',
-      merge_strategy TEXT NOT NULL DEFAULT 'append',
-      review_reason TEXT,
-      reviewed_by TEXT,
-      reviewed_at INTEGER,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wiki_retrieval_logs (
-      id TEXT PRIMARY KEY,
-      bot_id TEXT,
-      context_id TEXT,
-      chat_key TEXT,
-      response_run_id TEXT,
-      namespace TEXT NOT NULL,
-      policy TEXT NOT NULL,
-      query TEXT NOT NULL,
-      hit_count INTEGER NOT NULL DEFAULT 0,
-      hit_paths TEXT NOT NULL DEFAULT '[]',
-      duration_ms INTEGER,
-      error TEXT,
-      created_at INTEGER NOT NULL
-    );
-
     CREATE TABLE IF NOT EXISTS wecom_events (
       id TEXT PRIMARY KEY,
       msgid TEXT NOT NULL UNIQUE,
@@ -229,23 +185,6 @@ export async function initDb(): Promise<void> {
       error TEXT,
       dify_conversation_id TEXT,
       feedback_available INTEGER NOT NULL DEFAULT 1,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
-    );
-
-    CREATE TABLE IF NOT EXISTS wiki_feedback_items (
-      id TEXT PRIMARY KEY,
-      event_id TEXT NOT NULL REFERENCES wecom_events(id) ON DELETE CASCADE,
-      response_run_id TEXT,
-      namespace TEXT,
-      feedback_type INTEGER,
-      content TEXT,
-      inaccurate_reasons TEXT NOT NULL DEFAULT '[]',
-      classification TEXT NOT NULL DEFAULT 'unclassified',
-      status TEXT NOT NULL DEFAULT 'new',
-      assigned_target_path TEXT,
-      draft_id TEXT,
-      resolution_note TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
@@ -396,12 +335,6 @@ export async function initDb(): Promise<void> {
       created_at INTEGER NOT NULL
     );
 
-    CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_namespace_created
-      ON wiki_retrieval_logs(namespace, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_namespace_hit_count
-      ON wiki_retrieval_logs(namespace, hit_count);
-    CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_context
-      ON wiki_retrieval_logs(context_id);
     CREATE INDEX IF NOT EXISTS idx_wecom_events_event_type_created
       ON wecom_events(event_type, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_wecom_events_bot_created
@@ -410,10 +343,6 @@ export async function initDb(): Promise<void> {
       ON bot_response_runs(feedback_id);
     CREATE INDEX IF NOT EXISTS idx_bot_response_runs_chat_created
       ON bot_response_runs(bot_id, chat_key, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_wiki_feedback_items_namespace_status
-      ON wiki_feedback_items(namespace, status, created_at DESC);
-    CREATE INDEX IF NOT EXISTS idx_wiki_feedback_items_response_run
-      ON wiki_feedback_items(response_run_id);
     CREATE INDEX IF NOT EXISTS idx_annotation_answers_scope
       ON annotation_answers(namespace, context_id, enabled);
     CREATE INDEX IF NOT EXISTS idx_wecom_users_identity
@@ -453,17 +382,14 @@ export async function initDb(): Promise<void> {
   await addColumnIfMissing('skills', 'metadata_json', "TEXT NOT NULL DEFAULT '{}'")
   await addColumnIfMissing('skills', 'resource_index_json', "TEXT NOT NULL DEFAULT '{}'")
   await addColumnIfMissing('skills', 'permission_policy', "TEXT NOT NULL DEFAULT '{}'")
-  await addColumnIfMissing('wiki_knowledge_drafts', 'merge_strategy', "TEXT NOT NULL DEFAULT 'append'")
   await addColumnIfMissing('session_messages', 'response_run_id', 'TEXT')
-  await addColumnIfMissing('wiki_retrieval_logs', 'response_run_id', 'TEXT')
   await addColumnIfMissing('generation_tasks', 'preview_summary', 'TEXT')
-  await db.execute('CREATE INDEX IF NOT EXISTS idx_wiki_retrieval_logs_response_run ON wiki_retrieval_logs(response_run_id)')
   await seedDefaultSessionTtlSetting()
   await migrateAllowedProjects()
   await migrateScheduledTasksBotIdNullable()
   await migrateMcpServersSchema()
   await migrateSkillsBotIdNullable()
-  await seedBuiltinMcpServers()
+  await removeWikiMcpServers()
 }
 
 async function seedDefaultSessionTtlSetting(): Promise<void> {
@@ -624,23 +550,35 @@ async function migrateSkillsBotIdNullable(): Promise<void> {
   `)
 }
 
-async function seedBuiltinMcpServers(): Promise<void> {
-  const wikiMcpUrl = wikiMcpSseUrl()
-  const existing = await db.execute({
-    sql: `SELECT id FROM mcp_servers WHERE name = 'wiki-mcp (内置)'`,
-    args: [],
-  })
-  if (existing.rows.length > 0) return
-  const { randomUUID } = await import('crypto')
-  await db.execute({
-    sql: `INSERT INTO mcp_servers (id, bot_id, name, url, transport_type, enabled) VALUES (?, NULL, ?, ?, 'sse', 0)`,
-    args: [randomUUID(), 'wiki-mcp (内置)', wikiMcpUrl],
-  })
-}
+async function removeWikiMcpServers(): Promise<void> {
+  const legacyServers = await db.execute(`
+    SELECT id FROM mcp_servers
+    WHERE LOWER(name) LIKE '%wiki-mcp%'
+       OR LOWER(name) LIKE '%wiki mcp%'
+       OR LOWER(COALESCE(url, '')) LIKE '%wiki-mcp%'
+       OR LOWER(COALESCE(url, '')) LIKE '%/wiki%'
+       OR COALESCE(url, '') LIKE '%:3001%'
+  `)
+  const ids = legacyServers.rows.map((row) => String(row.id)).filter(Boolean)
+  const legacyIds = new Set([...ids, 'wiki-mcp'])
 
-function wikiMcpSseUrl(): string {
-  const configured = process.env.WIKI_MCP_URL?.trim()
-  const baseUrl = configured || `http://localhost:${process.env.WIKI_MCP_PORT ?? 3001}`
-  const normalized = baseUrl.replace(/\/+$/, '')
-  return normalized.endsWith('/sse') ? normalized : `${normalized}/sse`
+  for (const id of ids) {
+    await db.execute({ sql: 'DELETE FROM mcp_servers WHERE id = ?', args: [id] })
+  }
+
+  const contexts = await db.execute("SELECT id, mcp_configs FROM contexts WHERE mcp_configs IS NOT NULL AND mcp_configs != '[]'")
+  for (const row of contexts.rows) {
+    try {
+      const configs = JSON.parse(String(row.mcp_configs ?? '[]')) as Array<{ mcpServerId?: string }>
+      if (!Array.isArray(configs)) continue
+      const filtered = configs.filter((cfg) => !cfg.mcpServerId || !legacyIds.has(cfg.mcpServerId))
+      if (filtered.length === configs.length) continue
+      await db.execute({
+        sql: 'UPDATE contexts SET mcp_configs = ?, updated_at = ? WHERE id = ?',
+        args: [JSON.stringify(filtered), Date.now(), String(row.id)],
+      })
+    } catch {
+      // Leave malformed legacy JSON untouched so startup is not blocked.
+    }
+  }
 }

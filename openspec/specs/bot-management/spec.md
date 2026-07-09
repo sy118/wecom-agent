@@ -140,7 +140,7 @@ Context 的 `allowedProjects` 字段必须支持用户自由输入任意项目�
 
 #### 场景:Dify provider 下隐藏 MCP 配置
 - **当** 管理员进入 Dify provider Bot 的 Context 配置页面
-- **那么** 必须隐藏 MCP 能力配置区块，显示提示：“该 Bot 使用 Dify 工作流，知识库检索和工具调用由 Dify 内部处理”
+- **那么** 必须隐藏 MCP 能力配置区块，显示提示：“该 Bot 使用 Dify 工作流，工具调用由 Dify 内部处理”
 
 ### 需求:Bot 配置支持 visionEnabled 字段
 `bots` 表必须新增 `visionEnabled` 布尔字段，默认 `false`，控制是否将图片消息以多模态格式传给 LLM。
