@@ -99,6 +99,46 @@ docker push registry.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent:${DOCKER_TAG
 
 如果在阿里云 ECS 的 VPC 内推送，可将 `DOCKER_IMAGE` 改为 `registry-vpc.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent`，并登录对应 registry 域名。
 
+如果 MCP 服务和本应用部署在同一台 Linux 服务器，并且 MCP 只监听宿主机 `127.0.0.1`，可使用 host 网络部署文件：
+
+```bash
+docker compose down
+docker compose -f docker-compose.host.yml --env-file .env up -d --build
+```
+
+使用该模式时，MCP URL 可以填写 `http://127.0.0.1:1347/api/mcp`，Web 控制台仍通过 `WEB_PORT` 暴露，默认 `5173`。
+
+### OceanBase MCP
+
+Compose 会启动独立的 `oceanbase-mcp` 服务，并让 API 通过内部地址 `http://oceanbase-mcp:8000/mcp` 使用 `streamable-http` 连接。启动时会自动创建 OceanBase MCP Server；如果数据库中已有名称包含 `OceanBase` 的旧 SSE 配置，会保留原 ID 并修正为内部 Streamable HTTP 地址，因此已有 Context 引用不会失效。
+
+OceanBase sidecar 默认使用同一 ACR 仓库的 `oceanbase-mcp-0.0.4` tag。CI 中如需单独构建该镜像，Dockerfile 路径使用 `docker/oceanbase-mcp/Dockerfile`，构建上下文仍为项目根目录。
+
+在服务器 `.env` 中填写：
+
+```env
+OCEANBASE_MCP_AUTO_REGISTER=true
+OCEANBASE_MCP_ENABLE_MEMORY=0
+OCEANBASE_MCP_TOKEN=
+OB_HOST=your-oceanbase-host
+OB_PORT=2883
+OB_USER="your-user@tenant#cluster"
+OB_PASSWORD="your-oceanbase-password"
+OB_DATABASE=your-database
+```
+
+用户名或密码含 `#`、`!` 等字符时必须使用双引号，避免 `.env` 将 `#` 后面的内容当作注释。OceanBase MCP 默认只在 Compose 内部网络暴露，不需要开放宿主机 8000 端口。
+
+启动并检查：
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f oceanbase-mcp app
+```
+
+成功时，应用日志会出现类似 `[MCP] Loaded ... tools from OceanBase MCP`。管理员仍需在对应 Context 的“MCP 能力配置”中启用 OceanBase MCP，系统不会自动给所有机器人授予数据库工具权限。
+
 ## 控制台配置流程
 
 1. 登录 Web 控制台。

@@ -7,6 +7,11 @@ services:
       args:
         NODE_IMAGE: ${NODE_IMAGE:-ca7kangnvcl9wf.xuanyuan.run/library/node:20-alpine}
     restart: always
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      oceanbase-mcp:
+        condition: service_healthy
     environment:
       - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
@@ -17,10 +22,38 @@ services:
       - BOT_MESSAGE_CONCURRENCY=${BOT_MESSAGE_CONCURRENCY:-4}
       - BOT_QUEUE_BACKPRESSURE_LIMIT=${BOT_QUEUE_BACKPRESSURE_LIMIT:-10}
       - GENERATION_TASK_CONCURRENCY=${GENERATION_TASK_CONCURRENCY:-2}
+      - OCEANBASE_MCP_AUTO_REGISTER=${OCEANBASE_MCP_AUTO_REGISTER:-true}
+      - OCEANBASE_MCP_URL=http://oceanbase-mcp:8000/mcp
+      - OCEANBASE_MCP_TOKEN=${OCEANBASE_MCP_TOKEN:-}
     volumes:
       - api-data:/data
     ports:
       - "${WEB_PORT:-5173}:3000"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  oceanbase-mcp:
+    image: ${OCEANBASE_MCP_IMAGE:-registry.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent}:${OCEANBASE_MCP_TAG:-oceanbase-mcp-0.0.4}
+    build:
+      context: .
+      dockerfile: docker/oceanbase-mcp/Dockerfile
+      args:
+        PYTHON_IMAGE: ${OCEANBASE_MCP_PYTHON_IMAGE:-ca7kangnvcl9wf.xuanyuan.run/library/python:3.11-slim}
+    restart: always
+    environment:
+      OB_HOST: ${OB_HOST}
+      OB_PORT: ${OB_PORT:-2883}
+      OB_USER: ${OB_USER}
+      OB_PASSWORD: ${OB_PASSWORD}
+      OB_DATABASE: ${OB_DATABASE}
+      ALLOWED_TOKENS: ${OCEANBASE_MCP_TOKEN:-}
+      ENABLE_MEMORY: ${OCEANBASE_MCP_ENABLE_MEMORY:-0}
+      MCP_ALLOWED_HOSTS: ${OCEANBASE_MCP_ALLOWED_HOSTS:-oceanbase-mcp:*}
+    expose:
+      - "8000"
     logging:
       driver: json-file
       options:

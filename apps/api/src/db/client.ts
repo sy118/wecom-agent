@@ -390,6 +390,7 @@ export async function initDb(): Promise<void> {
   await migrateMcpServersSchema()
   await migrateSkillsBotIdNullable()
   await removeWikiMcpServers()
+  await ensureOceanBaseMcpServer()
 }
 
 async function seedDefaultSessionTtlSetting(): Promise<void> {
@@ -580,5 +581,40 @@ async function removeWikiMcpServers(): Promise<void> {
     } catch {
       // Leave malformed legacy JSON untouched so startup is not blocked.
     }
+  }
+}
+
+async function ensureOceanBaseMcpServer(): Promise<void> {
+  if (process.env.OCEANBASE_MCP_AUTO_REGISTER?.toLowerCase() === 'false') return
+  const url = process.env.OCEANBASE_MCP_URL?.trim()
+  if (!url) return
+
+  const token = process.env.OCEANBASE_MCP_TOKEN?.trim()
+  const headers = token ? { Authorization: 'Bearer ${OCEANBASE_MCP_TOKEN}' } : {}
+  const existing = await db.execute(`
+    SELECT id FROM mcp_servers
+    WHERE id = 'oceanbase-mcp'
+       OR LOWER(name) LIKE '%oceanbase%'
+  `)
+
+  if (existing.rows.length === 0) {
+    await db.execute({
+      sql: `INSERT INTO mcp_servers
+              (id, bot_id, name, url, transport_type, enabled, param_schema,
+               command, args_json, env_json, headers_json)
+            VALUES (?, NULL, ?, ?, 'streamable-http', 1, NULL, NULL, '[]', '{}', ?)`,
+      args: ['oceanbase-mcp', 'OceanBase MCP', url, JSON.stringify(headers)],
+    })
+    return
+  }
+
+  for (const row of existing.rows) {
+    await db.execute({
+      sql: `UPDATE mcp_servers
+            SET name = ?, url = ?, transport_type = 'streamable-http', enabled = 1,
+                command = NULL, args_json = '[]', env_json = '{}', headers_json = ?
+            WHERE id = ?`,
+      args: ['OceanBase MCP', url, JSON.stringify(headers), String(row.id)],
+    })
   }
 }
