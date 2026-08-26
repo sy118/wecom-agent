@@ -1,6 +1,6 @@
 import { randomUUID, createDecipheriv } from 'crypto'
 import { WSClient, MessageType } from '@wecom/aibot-node-sdk'
-import type { IMAdapter, IncomingMessage, IncomingContent, IncomingEvent, IMMediaFile, WecomMediaType } from '@wecom-platform/types'
+import type { IMAdapter, IncomingMessage, IncomingContent, IncomingEvent, IMMediaFile, WecomMediaType, WecomMediaKind } from '@wecom-platform/types'
 
 export interface WecomCredentials {
   botId: string
@@ -19,13 +19,52 @@ interface QuoteBody {
 
 async function imageContent(image: { url?: string; aeskey?: string } | undefined, visionEnabled: boolean): Promise<IncomingContent[]> {
   if (!image?.url) return []
-  if (!visionEnabled) return [{ type: 'text', text: '[图片]' }]
   if (!image.aeskey) return [{ type: 'image', url: image.url }]
   try {
     return [{ type: 'image', url: await decryptImageToDataUrl(image.url, image.aeskey) }]
   } catch (err) {
     console.error('[WecomAdapter] Image decrypt failed:', err)
     return [{ type: 'text', text: '[图片解密失败]' }]
+  }
+}
+
+export interface WecomMediaPersistInput {
+  url: string
+  aeskey?: string
+  kind: WecomMediaKind
+  sourceMessageId?: string | null
+}
+
+export interface WecomMediaPersistResult {
+  mediaId: string
+  dataUrl: string | null
+}
+
+export type WecomMediaPersistHandler = (input: WecomMediaPersistInput) => Promise<WecomMediaPersistResult | null>
+
+function mergePersistedAndVision(persisted: IncomingContent[], vision: IncomingContent[]): IncomingContent[] {
+  // persisted 已带 data URL（image 项）时避免与 vision 重复；否则两者都保留：
+  // 持久化媒体引用供历史回看，vision data URL 供模型即时视觉上下文。
+  return persisted.some((item) => item.type === 'image') ? persisted : [...persisted, ...vision]
+}
+
+async function persistMediaContent(
+  input: WecomMediaPersistInput,
+  visionEnabled: boolean,
+  persist?: WecomMediaPersistHandler | null
+): Promise<IncomingContent[]> {
+  if (!persist) return []
+  try {
+    const result = await persist(input)
+    if (!result) return []
+    const items: IncomingContent[] = [{ type: 'media', mediaId: result.mediaId, kind: input.kind }]
+    if (visionEnabled && result.dataUrl) {
+      items.unshift({ type: 'image', url: result.dataUrl })
+    }
+    return items
+  } catch (err) {
+    console.error('[WecomAdapter] Media persist failed:', err)
+    return []
   }
 }
 
@@ -71,6 +110,7 @@ export class WecomAdapter implements IMAdapter {
   private client: WSClient
   private messageHandler: ((msg: IncomingMessage) => Promise<void>) | null = null
   private eventHandler: ((event: IncomingEvent) => Promise<void>) | null = null
+  private mediaPersistHandler: WecomMediaPersistHandler | null = null
   private stopped = false
   private reconnectAttempts = 0
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null
@@ -111,6 +151,10 @@ export class WecomAdapter implements IMAdapter {
 
   onEvent(handler: (event: IncomingEvent) => Promise<void>): void {
     this.eventHandler = handler
+  }
+
+  onMediaPersist(handler: WecomMediaPersistHandler): void {
+    this.mediaPersistHandler = handler
   }
 
   isReconnecting(): boolean {
@@ -173,6 +217,15 @@ export class WecomAdapter implements IMAdapter {
         stream: { id: streamId, finish, content },
       },
     } as any)
+  }
+
+  /**
+   * Detect whether the SDK supports staged passive replies
+   * (placeholder with finish=false, final result with finish=true).
+   * @wecom/aibot-node-sdk exposes replyStream(frame, streamId, text, finish) — verified by SDK spike.
+   */
+  supportsPassiveReply(): boolean {
+    return typeof (this.client as any)?.replyStream === 'function'
   }
 
   private attachListeners(): void {
@@ -300,9 +353,17 @@ export class WecomAdapter implements IMAdapter {
       return text ? [{ type: 'text', text: `> 引用消息:\n${chatType === 'group' ? text.replace(AT_PREFIX_RE, '') : text}` }] : []
     }
     if (quote.msgtype === MessageType.Image || quote.msgtype === 'image') {
+      const persisted = quote.image?.url
+        ? await persistMediaContent(
+            { url: quote.image.url, aeskey: quote.image.aeskey, kind: 'image', sourceMessageId: null },
+            Boolean(this.credentials.visionEnabled),
+            this.mediaPersistHandler
+          )
+        : []
+      const vision = await quoteImageContent(quote.image, Boolean(this.credentials.visionEnabled))
       return [
         { type: 'text', text: '> 引用消息:\n[引用图片]' },
-        ...await quoteImageContent(quote.image, Boolean(this.credentials.visionEnabled)),
+        ...mergePersistedAndVision(persisted, vision),
       ]
     }
     return []
@@ -322,6 +383,14 @@ export class WecomAdapter implements IMAdapter {
     return this.withQuote(body, chatType, content)
   }
 
+  private async persistFromBody(body: any, url: string, aeskey: string | undefined, kind: WecomMediaKind): Promise<IncomingContent[]> {
+    return persistMediaContent(
+      { url, aeskey, kind, sourceMessageId: body?.msgid ? String(body.msgid) : null },
+      Boolean(this.credentials.visionEnabled),
+      this.mediaPersistHandler
+    )
+  }
+
   private async parseContentWithoutQuote(body: any, chatType: 'single' | 'group'): Promise<string | IncomingContent[]> {
     switch (body.msgtype) {
       case MessageType.Text: {
@@ -329,11 +398,30 @@ export class WecomAdapter implements IMAdapter {
         return chatType === 'group' ? raw.replace(AT_PREFIX_RE, '') : raw
       }
 
-      case MessageType.Image:
+      case MessageType.Image: {
+        const persisted = await this.persistFromBody(body, body.image?.url, body.image?.aeskey, 'image')
+        const vision = await imageContent(body.image, Boolean(this.credentials.visionEnabled))
         return [
           { type: 'text', text: `[图片]` },
-          ...await imageContent(body.image, Boolean(this.credentials.visionEnabled)),
+          ...mergePersistedAndVision(persisted, vision),
         ]
+      }
+
+      case MessageType.File: {
+        const persisted = await this.persistFromBody(body, body.file?.url, body.file?.aeskey, 'file')
+        return [
+          { type: 'text', text: `[文件]` },
+          ...persisted,
+        ]
+      }
+
+      case MessageType.Video: {
+        const persisted = await this.persistFromBody(body, body.video?.url, body.video?.aeskey, 'video')
+        return [
+          { type: 'text', text: `[视频]` },
+          ...persisted,
+        ]
+      }
 
       case MessageType.Voice: {
         const recognition = body.voice?.recognition ?? ''
@@ -347,7 +435,9 @@ export class WecomAdapter implements IMAdapter {
             const text: string = item.text.content
             items.push({ type: 'text', text: chatType === 'group' ? text.replace(AT_PREFIX_RE, '') : text })
           } else if (item.msgtype === 'image' && item.image?.url) {
-            items.push(...await imageContent(item.image, Boolean(this.credentials.visionEnabled)))
+            const persisted = await this.persistFromBody(body, item.image.url, item.image.aeskey, 'image')
+            const vision = await imageContent(item.image, Boolean(this.credentials.visionEnabled))
+            items.push(...mergePersistedAndVision(persisted, vision))
           }
         }
         return items.length > 0 ? items : '[混合消息]'

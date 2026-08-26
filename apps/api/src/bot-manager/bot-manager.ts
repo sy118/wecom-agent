@@ -102,6 +102,26 @@ export class BotManager extends EventEmitter {
     return all
   }
 
+  async cancelRun(botId: string, runId: string, actorUserId: string | null) {
+    const instance = this.instances.get(botId)
+    if (!instance) return { ok: false, reason: 'bot_not_running' }
+    return instance.cancelRun(runId, actorUserId)
+  }
+
+  async retryRun(botId: string, runId: string) {
+    const instance = this.instances.get(botId)
+    if (!instance) return { ok: false, reason: 'bot_not_running' }
+    return instance.retryRun(runId)
+  }
+
+  getRunDiagnostics() {
+    const result: Record<string, ReturnType<BotInstance['getRunDiagnostics']>> = {}
+    for (const [botId, instance] of this.instances) {
+      result[botId] = instance.getRunDiagnostics()
+    }
+    return result
+  }
+
   deleteSession(botId: string, chatKey: string): void {
     this.instances.get(botId)?.deleteSession(chatKey)
   }

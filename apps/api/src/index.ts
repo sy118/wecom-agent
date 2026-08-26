@@ -23,6 +23,15 @@ import { wecomEventsRouter } from './routes/wecom-events.js'
 import { settingsRouter } from './routes/settings.js'
 import { wecomCommandConfigRouter } from './routes/wecom-command-config.js'
 import { generatedFilesRouter } from './routes/generated-files.js'
+import { runsRouter } from './routes/runs.js'
+import { mediaRouter } from './routes/media.js'
+import { migrateHistoricalMedia, cleanupExpiredMedia } from './services/media-maintenance-service.js'
+import { wecomMcpRouter } from './routes/wecom-mcp.js'
+import { agentTemplatesRouter } from './routes/agent-templates.js'
+import { onboardingRouter } from './routes/onboarding.js'
+import { governanceRouter } from './routes/governance.js'
+import { TenantRepository } from './db/tenant-repository.js'
+import { seedBuiltinTemplates } from './services/template-service.js'
 import { AsyncLimiter } from '@wecom-platform/core'
 import type { BotConfig } from '@wecom-platform/types'
 
@@ -50,6 +59,10 @@ async function main(): Promise<void> {
   }
 
   await initDb()
+  await TenantRepository.ensureDefaultTenant()
+  void seedBuiltinTemplates('default').then((created) => {
+    console.log(`[Templates] Seeded ${created.length} builtin template(s)`)
+  }).catch((err) => console.error('[Templates] Seed failed:', err))
 
   // Initialize TaskScheduler after BotManager (single-direction dependency)
   const taskScheduler = new TaskScheduler(botManager)
@@ -73,6 +86,24 @@ async function main(): Promise<void> {
   app.use('/api/scheduled-tasks', authMiddleware, createScheduledTasksRouter(taskScheduler))
   app.use('/api/sessions', authMiddleware, sessionsRouter)
   app.use('/api/settings', authMiddleware, settingsRouter)
+  app.use('/api/runs', authMiddleware, runsRouter)
+  app.use('/api/wecom-mcp', authMiddleware, wecomMcpRouter)
+  app.use('/api/media', authMiddleware, mediaRouter)
+  app.use('/api/agent-templates', authMiddleware, agentTemplatesRouter)
+  app.use('/api/onboarding', authMiddleware, onboardingRouter)
+  app.use('/api/governance', authMiddleware, governanceRouter)
+
+  // 媒体历史迁移（启动后台执行）+ 每日清理
+  void migrateHistoricalMedia().then((report) => {
+    console.log(`[Media] Historical migration complete: scanned=${report.scanned}, migrated=${report.migrated}, expired=${report.expired}, skipped=${report.skipped}`)
+  }).catch((err) => console.error('[Media] Historical migration failed:', err))
+
+  const MEDIA_CLEANUP_INTERVAL_MS = configuredPositiveInt('WECOM_MEDIA_CLEANUP_INTERVAL_MS', 24 * 60 * 60 * 1000)
+  setInterval(() => {
+    void cleanupExpiredMedia().then((report) => {
+      console.log(`[Media] Cleanup complete: expired=${report.expired}, deleted=${report.deleted}, freedBytes=${report.freedBytes}`)
+    }).catch((err) => console.error('[Media] Cleanup failed:', err))
+  }, MEDIA_CLEANUP_INTERVAL_MS)
 
   if (existsSync(WEB_INDEX_FILE)) {
     app.use(express.static(WEB_DIST_DIR))

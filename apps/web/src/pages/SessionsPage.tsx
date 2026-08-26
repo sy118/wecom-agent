@@ -5,6 +5,7 @@ import { sessionsApi } from '../api/index.js'
 type IncomingContent =
   | { type: 'text'; text: string }
   | { type: 'image'; url: string }
+  | { type: 'media'; mediaId: string; kind: 'image' | 'file' | 'video'; status?: 'pending' | 'ready' | 'expired' }
 
 interface SessionMessage { role: 'human' | 'ai'; content: string | IncomingContent[] | unknown; timestamp: number }
 interface Session { botId: string; chatKey: string; contextId: string; contextName: string; messages: SessionMessage[]; lastActiveAt: number; expiresAt: number }
@@ -84,6 +85,29 @@ function MessageContent({ content }: { content: unknown }) {
           if (item.type === 'text') {
             return <div key={index}>{item.text}</div>
           }
+          if (item.type === 'media') {
+            if (item.status === 'expired') {
+              return <div key={index}><span>媒体已过期</span></div>
+            }
+            if (item.status === 'pending') {
+              return <div key={index}><span>媒体暂不可用，正在重试</span></div>
+            }
+            const token = localStorage.getItem('token') ?? ''
+            const mediaUrl = `/api/media/${encodeURIComponent(item.mediaId)}?token=${encodeURIComponent(token)}`
+            if (item.kind === 'image') {
+              return (
+                <div key={index}>
+                  <img src={mediaUrl} alt="图片" style={{ maxWidth: 320, borderRadius: 6 }} />
+                </div>
+              )
+            }
+            const label = item.kind === 'video' ? '视频' : '文件'
+            return (
+              <div key={index}>
+                <a href={mediaUrl} target="_blank" rel="noreferrer">下载{label}</a>
+              </div>
+            )
+          }
           return (
             <div key={index}>
               {item.url ? (
@@ -134,7 +158,8 @@ function isIncomingContentArray(value: unknown): value is IncomingContent[] {
     const candidate = item as Record<string, unknown>
     return (
       (candidate.type === 'text' && typeof candidate.text === 'string') ||
-      (candidate.type === 'image' && typeof candidate.url === 'string')
+      (candidate.type === 'image' && typeof candidate.url === 'string') ||
+      (candidate.type === 'media' && typeof candidate.mediaId === 'string')
     )
   })
 }

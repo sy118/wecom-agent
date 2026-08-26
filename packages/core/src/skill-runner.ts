@@ -43,7 +43,11 @@ export interface SkillScriptExecutionInput {
 function contentToText(content: string | IncomingContent[] | undefined): string {
   if (!content) return ''
   if (typeof content === 'string') return content
-  return content.map((item) => item.type === 'text' ? item.text : `[image: ${item.url}]`).join('\n')
+  return content.map((item) => {
+    if (item.type === 'text') return item.text
+    if (item.type === 'image') return `[image: ${item.url}]`
+    return item.status === 'expired' ? '[媒体已过期]' : `[${item.kind}]`
+  }).join('\n')
 }
 
 function preview(value: unknown, max = 1000): string | null {

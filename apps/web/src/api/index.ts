@@ -97,10 +97,61 @@ export const sessionsApi = {
   delete: (chatKey: string) => api.delete(`/sessions/${encodeURIComponent(chatKey)}`),
 }
 
+export const runsApi = {
+  list: () => api.get('/runs').then((r) => r.data),
+  get: (id: string) => api.get(`/runs/${id}`).then((r) => r.data),
+  cancel: (id: string) => api.post(`/runs/${id}/cancel`).then((r) => r.data),
+  retry: (id: string) => api.post(`/runs/${id}/retry`).then((r) => r.data),
+  diagnostics: () => api.get('/runs/diagnostics').then((r) => r.data),
+}
+
 export const scheduledTasksApi = {
   list: () => api.get('/scheduled-tasks').then((r) => r.data),
   create: (data: unknown) => api.post('/scheduled-tasks', data).then((r) => r.data),
   update: (id: string, data: unknown) => api.put(`/scheduled-tasks/${id}`, data).then((r) => r.data),
   delete: (id: string) => api.delete(`/scheduled-tasks/${id}`),
+}
+
+export const wecomMcpApi = {
+  catalog: () => api.get('/wecom-mcp/catalog').then((r) => r.data),
+  tools: () => api.get('/wecom-mcp/tools').then((r) => r.data),
+  register: () => api.post('/wecom-mcp/register').then((r) => r.data),
+  invoke: (module: string, name: string, data: unknown) => api.post(`/wecom-mcp/tools/${module}/${name}/invoke`, data).then((r) => r.data),
+  enable: (module: string, name: string, enabled: boolean) => api.post(`/wecom-mcp/tools/${module}/${name}/enable`, { enabled }).then((r) => r.data),
+  expireOverdue: () => api.post('/wecom-mcp/expire-overdue').then((r) => r.data),
+}
+
+export const approvalsApi = {
+  list: (status?: string) => api.get('/wecom-mcp/approvals', { params: status ? { status } : {} }).then((r) => r.data),
+  approve: (id: string, data: Record<string, unknown>) => api.post(`/wecom-mcp/approvals/${id}/decide`, { ...data, decision: 'approved' }).then((r) => r.data),
+  reject: (id: string, data: Record<string, unknown>) => api.post(`/wecom-mcp/approvals/${id}/decide`, { ...data, decision: 'rejected' }).then((r) => r.data),
+}
+
+export const templatesApi = {
+  list: (params?: { category?: string; search?: string }) => api.get('/agent-templates', { params }).then((r) => r.data),
+  get: (id: string) => api.get(`/agent-templates/${id}`).then((r) => r.data),
+  versions: (id: string) => api.get(`/agent-templates/${id}`).then((r) => r.data),
+  create: (data: unknown) => api.post('/agent-templates', data).then((r) => r.data),
+  import: (data: unknown) => api.post('/agent-templates/import', data).then((r) => r.data),
+  export: (id: string) => api.get(`/agent-templates/${id}/export`).then((r) => r.data),
+  publishVersion: (id: string, manifest: unknown) => api.post(`/agent-templates/${id}/versions`, { manifest }).then((r) => r.data),
+  enable: (id: string) => api.post(`/agent-templates/${id}/enable`).then((r) => r.data),
+  update: (id: string, data: unknown) => api.patch(`/agent-templates/${id}`, data).then((r) => r.data),
+}
+
+export const wizardApi = {
+  draft: () => api.get('/onboarding/draft').then((r) => r.data),
+  saveDraft: (data: unknown) => api.put('/onboarding/draft', data).then((r) => r.data),
+  submit: (data: unknown) => api.post('/onboarding/submit', data).then((r) => r.data),
+  test: (data: unknown) => api.post('/onboarding/test', data).then((r) => r.data),
+}
+
+export const adminApi = {
+  summary: () => api.get('/governance/summary').then((r) => r.data),
+  tenants: () => api.get('/governance/tenants').then((r) => r.data),
+  createTenant: (data: unknown) => api.post('/governance/tenants', data).then((r) => r.data),
+  auditLogs: (params?: unknown) => api.get('/governance/audit-logs', { params }).then((r) => r.data),
+  auditExport: () => api.get('/governance/audit-logs/export', { responseType: 'blob' }).then((r) => r.data),
+  usage: (params?: unknown) => api.get('/governance/usage', { params }).then((r) => r.data),
 }
 

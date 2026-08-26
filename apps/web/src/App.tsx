@@ -6,9 +6,13 @@ import BindingsPage from './pages/BindingsPage.js'
 import McpServersPage from './pages/McpServersPage.js'
 import SkillsPage from './pages/SkillsPage.js'
 import SessionsPage from './pages/SessionsPage.js'
+import RunDetailPage from './pages/RunDetailPage.js'
 import ScheduledTasksPage from './pages/ScheduledTasksPage.js'
 import SettingsPage from './pages/SettingsPage.js'
 import WecomCommandConfigPage from './pages/WecomCommandConfigPage.js'
+import TemplateMarketPage from './pages/TemplateMarketPage.js'
+import WizardPage from './pages/WizardPage.js'
+import AdminConsolePage from './pages/AdminConsolePage.js'
 import AppLayout from './components/AppLayout.js'
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -32,6 +36,10 @@ export default function App() {
           <Route path="wecom-command-config" element={<WecomCommandConfigPage />} />
           <Route path="settings" element={<SettingsPage />} />
           <Route path="sessions" element={<SessionsPage />} />
+          <Route path="runs/:id" element={<RunDetailPage />} />
+          <Route path="templates" element={<TemplateMarketPage />} />
+          <Route path="wizard" element={<WizardPage />} />
+          <Route path="admin" element={<AdminConsolePage />} />
         </Route>
       </Routes>
     </BrowserRouter>

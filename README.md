@@ -10,6 +10,34 @@
 - 定时任务：通过 cron 向指定群聊或用户发送自动化 Agent 任务结果。
 - 会话监控：查看活跃会话、历史消息和过期时间。
 - 企业微信事件：接收并记录智能机器人事件与用户反馈。
+- 企微 CLI+MCP 连接器：登记文档/表格/邮件/会议/日程/通讯录等 10 大模块工具，调用前做租户权限校验、写操作审批门、授权有效期检查与脱敏审计。
+- 模板市场与零门槛向导：内置查订单、会议纪要、日程提醒、邮件草稿、表格汇总、通讯录查询等场景模板；JSON 导入导出、版本管理；分步向导支持草稿续写与提交前校验。
+- 企业治理：管理员控制台（审批中心、审计日志检索导出、用量统计）、租户数据隔离、点名才回/免打扰时段/群消息节流等防打扰策略。
+
+## 企业产品化配置
+
+新能力默认关闭，按需在 `.env` 开启：
+
+```env
+# 企微 CLI+MCP 集成（Phase 1）
+WECOM_CLI_MCP_ENABLED=false
+WECOM_CLI_MCP_COMMAND=
+WECOM_CLI_MCP_URL=
+WECOM_CLI_MCP_MODULES=doc,table,mail,meeting,calendar,contacts
+# 写操作审批门
+APPROVAL_GATE_ENABLED=false
+# 模板市场（启动时写入 6 个内置模板）
+TEMPLATE_MARKET_ENABLED=false
+# 多租户默认租户标识
+DEFAULT_TENANT_ID=default
+# 防打扰：点名才回 / 免打扰时段 / 群消息节流
+WECOM_DND_MENTION_ONLY=false
+DO_NOT_DISTURB_WINDOWS=
+GROUP_THROTTLE_WINDOW_MS=10000
+GROUP_THROTTLE_MAX_MESSAGES=3
+```
+
+管理接口通过 `X-Admin-Key`（`ADMIN_API_KEY`）或 `X-Role: admin` 请求头校验管理员身份；审计日志导出与全部管理操作都会记录审计事件。
 
 ## 技术栈
 

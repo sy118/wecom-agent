@@ -4,6 +4,8 @@ export interface DifyConfig {
   baseUrl: string
   apiKey: string
   appId?: string | null
+  onStageStart?: (stage: string, meta?: Record<string, any>) => void | Promise<void>
+  onStageEnd?: (stage: string, meta?: Record<string, any>) => void | Promise<void>
 }
 
 export interface DifyChatResult {
@@ -20,7 +22,11 @@ export interface DifyChatStreamOptions {
 
 function contentToText(content: string | IncomingContent[]): string {
   if (typeof content === 'string') return content
-  return content.map((c) => (c.type === 'text' ? c.text : `[图片: ${c.url}]`)).join('\n')
+  return content.map((c) => {
+    if (c.type === 'text') return c.text
+    if (c.type === 'image') return `[图片: ${c.url}]`
+    return c.status === 'expired' ? '[媒体已过期]' : `[${c.kind}]`
+  }).join('\n')
 }
 
 function contentToFiles(content: string | IncomingContent[]): Array<{ type: string; transfer_method: string; url: string }> {
@@ -80,6 +86,7 @@ export class DifyClient {
     conversationId: string | null,
     userId = 'wecom-user'
   ): Promise<DifyChatResult> {
+    await this.config.onStageStart?.('dify', { mode: 'blocking' })
     const body = buildChatBody(content, conversationId, userId, 'blocking')
 
     const controller = new AbortController()
@@ -102,13 +109,16 @@ export class DifyClient {
       }
 
       const data = (await res.json()) as { answer: string; conversation_id: string }
-      return { answer: data.answer, conversationId: data.conversation_id }
+      const result = { answer: data.answer, conversationId: data.conversation_id }
+      await this.config.onStageEnd?.('dify')
+      return result
     } finally {
       clearTimeout(timeout)
     }
   }
 
   async chatStream(options: DifyChatStreamOptions): Promise<DifyChatResult> {
+    await this.config.onStageStart?.('dify', { mode: 'streaming' })
     const body = buildChatBody(options.content, options.conversationId, options.userId, 'streaming')
     const controller = new AbortController()
     const timeout = setTimeout(() => controller.abort(), 120_000)
@@ -150,7 +160,9 @@ export class DifyClient {
         }
       }
 
-      return { answer, conversationId }
+      const result = { answer, conversationId }
+      await this.config.onStageEnd?.('dify')
+      return result
     } finally {
       clearTimeout(timeout)
     }

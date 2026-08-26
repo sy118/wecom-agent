@@ -2,11 +2,15 @@ import { randomUUID } from 'crypto'
 import { readFile } from 'fs/promises'
 import type { Client } from '@libsql/client'
 import type { StructuredTool } from '@langchain/core/tools'
-import { AgentEngine, AsyncLimiter, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpToolClient, createSkillTools } from '@wecom-platform/core'
+import { AgentEngine, AsyncLimiter, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpToolClient, createSkillTools, decryptWecomImage } from '@wecom-platform/core'
 import type { McpToolClient } from '@wecom-platform/core'
 import { SessionStore } from '../session-store.js'
+import { MediaDownloadService, registerWecomImageDecrypt } from '../services/media-download-service.js'
+import { DoNotDisturbService } from '../services/do-not-disturb-service.js'
 import { SkillAuditRepository } from '../db/skill-audit-repository.js'
 import { BotResponseRunRepository } from '../db/bot-response-run-repository.js'
+import { RunStageEventRepository } from '../db/run-stage-event-repository.js'
+import { WecomMediaRepository } from '../db/wecom-media-repository.js'
 import { AnnotationAnswerRepository } from '../db/annotation-answer-repository.js'
 import { ActiveContextRepository, CommandPermissionRepository, ContextAccessRepository, WecomUserRepository } from '../db/wecom-access-repository.js'
 import { ModelConfigRepository } from '../db/generation-repository.js'
@@ -19,7 +23,7 @@ import { parseWecomCommand } from '../commands/wecom-command-parser.js'
 import { WecomCommandExecutor } from '../commands/wecom-command-executor.js'
 import type { WecomCommandActor, WecomCommandHandlerResult, WecomCommandRuntime } from '../commands/wecom-command-executor.js'
 import type { ParsedWecomCommand } from '../commands/wecom-command-parser.js'
-import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, IncomingEvent, Session, SessionMessage, BotResponseRun, GeneratedFile, WecomMediaType, WecomUserRole, WecomUserStatus } from '@wecom-platform/types'
+import type { BotConfig, ContextConfig, Binding, McpServerConfig, McpConfig, SkillConfig, SkillDefinition, IncomingMessage, IncomingContent, IncomingEvent, Session, SessionMessage, BotResponseRun, GeneratedFile, WecomMediaType, WecomUserRole, WecomUserStatus, RunStageName, StallPoint, StreamingMode } from '@wecom-platform/types'
 
 const QUEUE_BACKPRESSURE_LIMIT = configuredPositiveInt('BOT_QUEUE_BACKPRESSURE_LIMIT') ?? 10
 const messageProcessingLimiter = new AsyncLimiter(configuredPositiveInt('BOT_MESSAGE_CONCURRENCY') ?? 4)
@@ -29,10 +33,31 @@ const THINKING_MESSAGE = '🤔 正在分析，请稍候...'
 const STREAM_TOOL_MSG = '🔍 正在检索相关信息...'
 const TYPEWRITER_INTERVAL_MS = 800
 const EMPTY_RESPONSE_FALLBACK = '抱歉，我暂时无法生成有效回复，请稍后重试。'
-const PROGRESS_HEARTBEAT_INTERVAL_MS = 5_000
+const PROGRESS_HEARTBEAT_INTERVAL_MS = configuredPositiveInt('PROGRESS_HEARTBEAT_INTERVAL_MS') ?? 5_000
+const PROGRESS_MILESTONE_MIN_INTERVAL_MS = configuredPositiveInt('PROGRESS_MILESTONE_MIN_INTERVAL_MS') ?? 30_000
+const RESPONSE_SOFT_PROMPT_THRESHOLD_MS = configuredPositiveInt('RESPONSE_SOFT_PROMPT_THRESHOLD_MS') ?? 20_000
+const QUEUE_BACKPRESSURE_HINT_THRESHOLD = configuredPositiveInt('BOT_QUEUE_BACKPRESSURE_HINT_THRESHOLD') ?? 3
 const MCP_SESSION_RETRY_FLAG = 'mcpSessionRetry'
 
-type ProgressPhase = 'thinking' | 'tool' | 'organizing'
+type ProgressPhase = 'queued' | 'thinking' | 'tool' | 'organizing' | 'dify' | 'model'
+
+const STALL_POINT_BY_PHASE: Record<ProgressPhase, StallPoint> = {
+  queued: 'queued',
+  thinking: 'model',
+  tool: 'tool',
+  organizing: 'model',
+  dify: 'dify',
+  model: 'model',
+}
+
+const STAGE_BY_PHASE: Record<ProgressPhase, RunStageName> = {
+  queued: 'queued',
+  thinking: 'model',
+  tool: 'tool',
+  organizing: 'model',
+  dify: 'dify',
+  model: 'model',
+}
 
 function configuredPositiveInt(envKey: string): number | undefined {
   const raw = process.env[envKey]
@@ -88,7 +113,11 @@ function withMcpSessionRetryMetadata(config: unknown): Record<string, unknown> {
 
 function contentText(content: string | IncomingContent[]): string {
   if (typeof content === 'string') return content
-  return content.map((item) => (item.type === 'text' ? item.text : `[图片: ${item.url}]`)).join('\n')
+  return content.map((item) => {
+    if (item.type === 'text') return item.text
+    if (item.type === 'image') return `[图片: ${item.url}]`
+    return item.status === 'expired' ? '[媒体已过期]' : `[${item.kind}]`
+  }).join('\n')
 }
 
 function formatElapsed(startedAt: number): string {
@@ -114,6 +143,15 @@ function progressMessage(phase: ProgressPhase, startedAt: number, tick: number):
   return `${title}\n${progressBar(tick)}，已用时间：${formatElapsed(startedAt)}`
 }
 
+function progressPhaseLabel(phase: ProgressPhase): string {
+  if (phase === 'queued') return '排队'
+  if (phase === 'tool') return '检索/调用工具'
+  if (phase === 'organizing') return '整理结果'
+  if (phase === 'dify') return '等待服务响应'
+  if (phase === 'model') return '思考'
+  return '思考'
+}
+
 export function isVisionFallbackError(err: unknown): boolean {
   const status = (err as any)?.response?.status ?? (err as any)?.status
   return status === 400 || status === 422
@@ -124,7 +162,11 @@ export function getVisionFallbackSessionMessages(_sessionMessages: SessionMessag
 }
 
 export function degradeVisionContent(content: IncomingContent[]): string {
-  return content.map((c) => (c.type === 'text' ? c.text : `[图片: ${c.url}]`)).join('\n')
+  return content.map((c) => {
+    if (c.type === 'text') return c.text
+    if (c.type === 'image') return `[图片: ${c.url}]`
+    return c.status === 'expired' ? '[媒体已过期]' : `[${c.kind}]`
+  }).join('\n')
 }
 
 export function shouldSkipRuntimeToolsForDify(
@@ -204,6 +246,11 @@ export class BotInstance {
   private discoveredChats = new Map<string, DiscoveredChat>()
   private commandExecutor: WecomCommandExecutor
   private completedTemplateCardTasks = new Set<string>()
+  private runControllers = new Map<string, AbortController>()
+  private runFinalized = new Set<string>()
+  private softPromptTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private mediaDownloadService: MediaDownloadService
+  private disturbanceService: DoNotDisturbService
 
   constructor(private deps: BotInstanceDeps) {
     this.adapter = new WecomAdapter({
@@ -220,6 +267,9 @@ export class BotInstance {
     this.commandExecutor = new WecomCommandExecutor({
       handle: (command, runtime, actor) => this.handleRuntimeCommand(command, runtime, actor),
     })
+    this.mediaDownloadService = new MediaDownloadService()
+    registerWecomImageDecrypt((url, aeskey) => decryptWecomImage(url, aeskey))
+    this.disturbanceService = new DoNotDisturbService()
   }
 
   private async handleRuntimeCommand(
@@ -866,6 +916,21 @@ export class BotInstance {
 
     this.adapter.onMessage((msg) => this.handleMessage(msg))
     this.adapter.onEvent((event) => this.handleEvent(event))
+    this.adapter.onMediaPersist(async (input) => {
+      try {
+        const result = await this.mediaDownloadService.enqueue({
+          url: input.url,
+          aeskey: input.aeskey,
+          kind: input.kind,
+          sourceMessageId: input.sourceMessageId,
+          sessionId: null,
+        })
+        return { mediaId: result.mediaId, dataUrl: result.dataUrl }
+      } catch (err) {
+        console.error(`[BotInstance:${this.deps.bot.id}] Failed to enqueue media download:`, err)
+        return null
+      }
+    })
     await this.adapter.start()
   }
 
@@ -875,6 +940,10 @@ export class BotInstance {
     this.queues.clear()
     this.processedMsgs.clear()
     this.discoveredChats.clear()
+    this.runControllers.clear()
+    this.runFinalized.clear()
+    for (const timer of this.softPromptTimers.values()) clearInterval(timer)
+    this.softPromptTimers.clear()
     await this.closeMcpToolClients()
     this.toolPool.clear()
     this.skillToolPool.clear()
@@ -890,6 +959,109 @@ export class BotInstance {
 
   deleteSession(chatKey: string): void {
     this.sessions.delete(chatKey)
+  }
+
+  async cancelRun(runId: string, actorUserId: string | null): Promise<{ ok: boolean; reason?: string }> {
+    const run = await BotResponseRunRepository.findById(runId)
+    if (!run || run.botId !== this.deps.bot.id) return { ok: false, reason: 'run_not_found' }
+    if (run.status === 'sent' || run.status === 'error') return { ok: false, reason: 'run_not_active' }
+    if (this.runFinalized.has(runId)) return { ok: false, reason: 'run_finalized' }
+
+    const controller = this.runControllers.get(runId)
+    if (controller) controller.abort()
+    this.runFinalized.add(runId)
+    await BotResponseRunRepository.markError(runId, 'cancelled by user')
+    await this.publishStageEvent(runId, 'done', 'start', { cancelled: true, actor: actorUserId })
+    await BotResponseRunRepository.updateStallPoint(runId, 'done')
+    return { ok: true }
+  }
+
+  async retryRun(runId: string): Promise<{ ok: boolean; runId?: string; reason?: string }> {
+    const run = await BotResponseRunRepository.findById(runId)
+    if (!run || run.botId !== this.deps.bot.id) return { ok: false, reason: 'run_not_found' }
+    if (run.status === 'pending') return { ok: false, reason: 'run_active' }
+
+    const newRun = await BotResponseRunRepository.create({
+      feedbackId: randomUUID(),
+      botId: run.botId,
+      contextId: run.contextId,
+      sessionId: run.sessionId,
+      chatKey: run.chatKey,
+      chatId: run.chatId,
+      userId: run.userId,
+      questionPreview: run.questionPreview,
+      provider: run.provider,
+      model: run.model,
+      feedbackAvailable: true,
+    })
+    await this.publishStageEvent(newRun.id, 'queued', 'start', { retryOf: runId })
+    await BotResponseRunRepository.updateStallPoint(newRun.id, 'queued')
+    return { ok: true, runId: newRun.id }
+  }
+
+  getRunDiagnostics(): { activeRuns: number; finalizedRuns: number; limiterActive: number; limiterPending: number } {
+    return {
+      activeRuns: this.runControllers.size,
+      finalizedRuns: this.runFinalized.size,
+      limiterActive: messageProcessingLimiter.activeCount,
+      limiterPending: messageProcessingLimiter.pendingCount,
+    }
+  }
+
+  private replyStreamingMode(): 'auto' | 'force' | 'off' {
+    const mode = (process.env.WECOM_REPLY_STREAMING_MODE ?? 'auto').toLowerCase()
+    return mode === 'force' || mode === 'off' ? mode : 'auto'
+  }
+
+  /**
+   * 被动回复协议：占位（finish=false）+ 最终（finish=true）。
+   * SDK 不支持时记录降级原因并走“心跳 + 最终结果”路径。
+   */
+  private createPassiveReplyProtocol(
+    chatId: string,
+    frame: any | undefined,
+    responseRun: BotResponseRun,
+    mode: StreamingMode
+  ) {
+    const configured = this.replyStreamingMode()
+    const sdkSupported = this.adapter.supportsPassiveReply()
+    const enabled = configured === 'force' || (configured === 'auto' && sdkSupported)
+    if (!enabled) {
+      console.warn(
+        `[BotInstance:${this.deps.bot.id}] Passive reply degraded: mode=${configured}, sdkSupported=${sdkSupported}; falling back to heartbeat + final`
+      )
+    }
+
+    let streamId: string | undefined
+    const adapter = this.adapter
+    const botId = this.deps.bot.id
+    return {
+      get streamId() {
+        return streamId
+      },
+      sendPlaceholder: async (): Promise<string | undefined> => {
+        if (!frame || !enabled) return undefined
+        try {
+          streamId = await adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
+          return streamId
+        } catch (err) {
+          console.warn(`[BotInstance:${botId}] Passive placeholder unavailable:`, err)
+          streamId = undefined
+          return undefined
+        }
+      },
+      sendFinal: async (text: string): Promise<void> => {
+        if (streamId) {
+          try {
+            await adapter.editMessage(chatId, streamId, text, true)
+            return
+          } catch (err) {
+            console.warn(`[BotInstance:${botId}] Passive final edit failed:`, err)
+          }
+        }
+        await adapter.sendMessage(chatId, text).catch(() => {})
+      },
+    }
   }
 
   getDiscoveredChats(): DiscoveredChat[] {
@@ -1019,6 +1191,16 @@ export class BotInstance {
     if (this.deps.bot.visionEnabled) return msg.content
     // visionEnabled=false: keep only text parts, replace image items with [图片] label (no URL)
     return msg.content.map((c) => (c.type === 'text' ? c.text : '[图片]')).join('\n')
+  }
+
+  private rawTextOf(msg: IncomingMessage): string | undefined {
+    const body = msg.rawBody as any
+    const direct = body?.text?.content
+    if (typeof direct === 'string' && direct.trim()) return direct
+    const mixedText = body?.mixed?.msg_item?.find?.((item: any) => item.msgtype === 'text' && typeof item.text?.content === 'string')?.text?.content
+    if (typeof mixedText === 'string' && mixedText.trim()) return mixedText
+    if (typeof msg.content === 'string') return msg.content
+    return undefined
   }
 
   async handleEvent(event: IncomingEvent): Promise<void> {
@@ -1169,6 +1351,17 @@ export class BotInstance {
       return
     }
 
+    const disturbance = this.disturbanceService.decide({
+      chatType: msg.chatType === 'group' ? 'group' : 'user',
+      message: this.rawTextOf(msg) ?? '',
+      botName: this.deps.bot.name,
+      chatKey,
+    })
+    if (!disturbance.shouldReply) {
+      console.log(`[BotInstance:${this.deps.bot.id}] Disturbance suppressed (${disturbance.reason}) for ${chatKey}`)
+      return
+    }
+
     const resolvedContext = await this.resolveEffectiveContext(chatKey, msg.userId)
     const context = resolvedContext?.context ?? null
     if (!context) {
@@ -1185,6 +1378,9 @@ export class BotInstance {
       await this.adapter.sendMessage(chatId, BUSY_MESSAGE).catch(() => {})
       return
     }
+    if (queue.size >= QUEUE_BACKPRESSURE_HINT_THRESHOLD) {
+      await this.adapter.sendMessage(chatId, `⏳ 当前队列繁忙，前面还有 ${queue.size} 条消息在排队，我会依次处理。`).catch(() => {})
+    }
 
     const content = this.resolveContent(msg)
     const frame = (msg as any)._frame
@@ -1197,8 +1393,14 @@ export class BotInstance {
         }
 
         const session = await this.sessions.getOrCreate(chatKey, context.id, context.sessionTtlMin)
+        await WecomMediaRepository.linkSessionBySourceMessage(msgId, session.id).catch(() => {})
         const { streamingMode } = this.deps.bot
         const responseRun = await this.createResponseRun(context, session, chatKey, chatId, msg.userId, content)
+        await this.publishStageEvent(responseRun.id, 'queued', 'start')
+        await BotResponseRunRepository.updateStallPoint(responseRun.id, 'queued')
+        const controller = new AbortController()
+        this.runControllers.set(responseRun.id, controller)
+        try {
         const annotation = await this.findAnnotationAnswer(context, content)
         if (annotation) {
           await AnnotationAnswerRepository.recordHit(annotation.id)
@@ -1206,6 +1408,10 @@ export class BotInstance {
           await this.saveMessages(chatKey, content, answer, responseRun.id)
           await BotResponseRunRepository.markSent(responseRun.id, answer)
           await this.sendTrackedStaticReply(chatId, answer, responseRun, frame)
+          await this.publishStageEvent(responseRun.id, 'queued', 'end')
+          await this.publishStageEvent(responseRun.id, 'done', 'start')
+          await BotResponseRunRepository.updateStallPoint(responseRun.id, 'done')
+          this.runFinalized.add(responseRun.id)
           return
         }
 
@@ -1218,6 +1424,7 @@ export class BotInstance {
           } else {
             await this.handleDifyStreaming(chatId, chatKey, content, session.difyConversationId ?? null, frame, responseRun)
           }
+          await this.publishStageEvent(responseRun.id, 'queued', 'end')
           return
         }
 
@@ -1227,7 +1434,7 @@ export class BotInstance {
         const tools = this.mergeTools(mcpTools, skillTools)
         let systemPrompt = injectAllowedProjects(context.systemPrompt, context.mcpConfigs ?? [])
         systemPrompt = appendSkillPrompts(systemPrompt, buildSkillPromptAdditions([...this.skillToolPool.values()], context.skillConfigs ?? [], content))
-        const promptWithForcedResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content)
+        const promptWithForcedResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content, responseRun.id)
 
         if (streamingMode === 'progressive') {
           await this.handleProgressive(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
@@ -1235,6 +1442,10 @@ export class BotInstance {
           await this.handleTypewriter(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
         } else {
           await this.handleNone(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
+        }
+        await this.publishStageEvent(responseRun.id, 'queued', 'end')
+        } finally {
+          this.runControllers.delete(responseRun.id)
         }
       })
     })
@@ -1317,31 +1528,82 @@ export class BotInstance {
     )
   }
 
-  private createProgressReporter(chatId: string, frame: any | undefined, responseRun: BotResponseRun) {
+  private async publishStageEvent(
+    runId: string,
+    stage: RunStageName,
+    action: 'start' | 'end',
+    meta?: Record<string, any>
+  ): Promise<void> {
+    try {
+      if (action === 'start') {
+        const events = await RunStageEventRepository.findByRunId(runId)
+        const sequence = events.length + 1
+        await RunStageEventRepository.create({ runId, stage, sequence, startedAt: Date.now(), meta })
+      } else {
+        await RunStageEventRepository.end(runId, stage, Date.now())
+      }
+    } catch (err) {
+      console.warn(`[BotInstance:${this.deps.bot.id}] Failed to persist stage event ${stage}/${action}:`, err)
+    }
+  }
+
+  private createProgressReporter(
+    chatId: string,
+    frame: any | undefined,
+    responseRun: BotResponseRun,
+    mode: StreamingMode = 'progressive'
+  ) {
     let streamId: string | undefined
     let phase: ProgressPhase = 'thinking'
     let interval: ReturnType<typeof setInterval> | undefined
+    let softPromptTimer: ReturnType<typeof setInterval> | undefined
     let tick = 0
     let active = false
     let editAvailable = true
+    let softPromptedAt = 0
     const startedAt = Date.now()
+    const runId = responseRun.id
 
     const stop = () => {
       active = false
       if (interval) clearInterval(interval)
       interval = undefined
+      if (softPromptTimer) clearInterval(softPromptTimer)
+      softPromptTimer = undefined
+      this.softPromptTimers.delete(runId)
     }
 
     const render = async () => {
-      if (!active || !streamId || !editAvailable) return
+      if (!active || !editAvailable) return
       try {
-        await this.adapter.editMessage(chatId, streamId, progressMessage(phase, startedAt, tick), false)
-        tick += 1
+        if (mode === 'progressive' && streamId) {
+          await this.adapter.editMessage(chatId, streamId, progressMessage(phase, startedAt, tick), false)
+          tick += 1
+        } else if (mode !== 'progressive') {
+          // typewriter / none: throttled text heartbeat, never interrupts streaming output
+          const now = Date.now()
+          if (now - startedAt >= 5_000) {
+            await this.adapter.sendMessage(chatId, progressMessage(phase, startedAt, tick)).catch(() => {})
+            tick += 1
+          }
+        }
+        await BotResponseRunRepository.touchActivity(runId)
       } catch (err) {
         editAvailable = false
         stop()
-        console.warn(`[BotInstance:${this.deps.bot.id}] Progress heartbeat stopped after edit failure:`, err)
+        console.warn(`[BotInstance:${this.deps.bot.id}] Progress heartbeat stopped after failure:`, err)
       }
+    }
+
+    const maybeSoftPrompt = async () => {
+      if (!active) return
+      const run = await BotResponseRunRepository.findById(runId)
+      const lastActivity = run?.lastActivityAt ?? startedAt
+      const elapsed = Date.now() - lastActivity
+      if (elapsed < RESPONSE_SOFT_PROMPT_THRESHOLD_MS) return
+      if (Date.now() - softPromptedAt < RESPONSE_SOFT_PROMPT_THRESHOLD_MS) return
+      softPromptedAt = Date.now()
+      await this.adapter.sendMessage(chatId, `⏳ 仍在处理，当前处于${progressPhaseLabel(phase)}阶段，已用时间：${formatElapsed(startedAt)}`).catch(() => {})
     }
 
     return {
@@ -1349,8 +1611,12 @@ export class BotInstance {
         return streamId
       },
       start: async () => {
+        await this.publishStageEvent(runId, STAGE_BY_PHASE[phase], 'start')
+        await BotResponseRunRepository.updateStallPoint(runId, STALL_POINT_BY_PHASE[phase])
         if (!frame) {
           await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
+          active = true
+          interval = setInterval(() => { void render() }, PROGRESS_HEARTBEAT_INTERVAL_MS)
           return
         }
         try {
@@ -1360,22 +1626,44 @@ export class BotInstance {
           editAvailable = false
           console.warn(`[BotInstance:${this.deps.bot.id}] Progress stream unavailable:`, err)
           await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
-          return
+        }
+        if (mode === 'none') {
+          // none 模式不创建流式消息，心跳全部走普通文本
+          streamId = undefined
+        }
+        if (mode !== 'progressive') {
+          await this.adapter.sendMessage(chatId, progressMessage(phase, startedAt, tick)).catch(() => {})
         }
         active = true
         interval = setInterval(() => { void render() }, PROGRESS_HEARTBEAT_INTERVAL_MS)
+        softPromptTimer = setInterval(() => { void maybeSoftPrompt() }, PROGRESS_HEARTBEAT_INTERVAL_MS)
+        this.softPromptTimers.set(runId, softPromptTimer)
       },
       setPhase: (nextPhase: ProgressPhase) => {
         if (!active || !editAvailable) return
+        if (nextPhase === phase) return
+        const previousStage = STAGE_BY_PHASE[phase]
+        const nextStage = STAGE_BY_PHASE[nextPhase]
+        if (nextStage !== previousStage) {
+          void this.publishStageEvent(runId, previousStage, 'end')
+          void this.publishStageEvent(runId, nextStage, 'start')
+          void BotResponseRunRepository.updateStallPoint(runId, STALL_POINT_BY_PHASE[nextPhase])
+        }
         phase = nextPhase
         void render()
       },
       finish: async (text: string) => {
         stop()
+        await this.publishStageEvent(runId, STAGE_BY_PHASE[phase], 'end')
+        await this.publishStageEvent(runId, 'done', 'start')
+        await BotResponseRunRepository.updateStallPoint(runId, 'done')
+        this.runFinalized.add(runId)
         await this.finishTrackedReply(chatId, text, responseRun, streamId)
       },
       fail: async (text: string) => {
         stop()
+        await this.publishStageEvent(runId, STAGE_BY_PHASE[phase], 'end')
+        this.runFinalized.add(runId)
         await this.sendRunErrorReply(chatId, text, responseRun, streamId)
       },
       stop,
@@ -1544,13 +1832,19 @@ export class BotInstance {
   private async executeForceCallMcps(
     systemPrompt: string,
     mcpConfigs: McpConfig[],
-    content: string | IncomingContent[]
+    content: string | IncomingContent[],
+    runId?: string
   ): Promise<string> {
     const results: string[] = []
     const FORCE_CALL_TIMEOUT_MS = 55_000
+    const startedAt = Date.now()
     const query = typeof content === 'string'
       ? content
-      : content.map((item) => (item.type === 'text' ? item.text : `[图片: ${item.url}]`)).join('\n')
+      : content.map((item) => {
+          if (item.type === 'text') return item.text
+          if (item.type === 'image') return `[图片: ${item.url}]`
+          return item.status === 'expired' ? '[媒体已过期]' : `[${item.kind}]`
+        }).join('\n')
 
     for (const cfg of mcpConfigs) {
       if (!cfg.enabled) continue
@@ -1562,13 +1856,26 @@ export class BotInstance {
       for (const tool of serverTools) {
         const shape = (tool as any).schema?.shape
         if (!shape || !('query' in shape)) continue
+        if (runId) {
+          await this.publishStageEvent(runId, 'force-call-mcp', 'start', { toolName: tool.name })
+          await BotResponseRunRepository.updateStallPoint(runId, 'force-call-mcp')
+        }
         try {
           const output = await this.invokeWithTimeout(tool, { query }, FORCE_CALL_TIMEOUT_MS)
           results.push(`[${tool.name}]\n${typeof output === 'string' ? output : JSON.stringify(output)}`)
+          if (runId) await this.publishStageEvent(runId, 'force-call-mcp', 'end', { toolName: tool.name, status: 'success' })
         } catch (err) {
           console.error(`[BotInstance:${this.deps.bot.id}] Force-call MCP failed: ${tool.name}`, err)
+          if (runId) {
+            await this.publishStageEvent(runId, 'force-call-mcp', 'end', { toolName: tool.name, status: 'error' })
+            await this.publishStageEvent(runId, 'force-call-mcp', 'start', { toolName: tool.name, totalTimeoutAlert: true })
+          }
         }
       }
+    }
+
+    if (runId && Date.now() - startedAt > FORCE_CALL_TIMEOUT_MS) {
+      await this.publishStageEvent(runId, 'force-call-mcp', 'start', { totalTimeoutAlert: true })
     }
 
     if (results.length === 0) return systemPrompt
@@ -1585,18 +1892,28 @@ export class BotInstance {
     frame: any | undefined,
     responseRun: BotResponseRun
   ): Promise<void> {
-    await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
+    const reporter = this.createProgressReporter(chatId, frame, responseRun, 'none')
+    await reporter.start()
     try {
-      const response = safeReply(await this.engine!.invokeWithTools(sessionMessages, content, systemPrompt, tools))
+      const response = safeReply(await this.engine!.invokeWithTools(sessionMessages, content, systemPrompt, tools, {
+        onStageStart: async (stage) => {
+          if (stage === 'tool') reporter.setPhase('tool')
+          if (stage === 'model') reporter.setPhase('model')
+        },
+        onStageEnd: async (stage) => {
+          if (stage === 'tool') reporter.setPhase('organizing')
+        },
+      }))
       await this.saveMessages(chatKey, content, response, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, response)
-      await this.sendTrackedStaticReply(chatId, response, responseRun, frame)
+      await reporter.finish(response)
     } catch (err: any) {
+      reporter.stop()
       if (err instanceof RecursionLimitError) {
         const response = safeReply(err.summary)
         await this.saveMessages(chatKey, content, response, responseRun.id)
         await BotResponseRunRepository.markSent(responseRun.id, response)
-        await this.sendTrackedStaticReply(chatId, response, responseRun, frame)
+        await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
         return
       }
       // Vision fallback: if LLM rejects multimodal input (400/422), retry with text-only degradation
@@ -1607,14 +1924,14 @@ export class BotInstance {
           const response = await invokeVisionFallback(this.engine!, sessionMessages, content, systemPrompt, tools)
           await this.saveMessages(chatKey, degradeVisionContent(content), response, responseRun.id)
           await BotResponseRunRepository.markSent(responseRun.id, response)
-          await this.sendTrackedStaticReply(chatId, response, responseRun, frame)
+          await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
           return
         } catch {
           // fall through to generic error
         }
       }
       console.error(`[BotInstance:${this.deps.bot.id}] Agent error:`, err)
-      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun)
+      await reporter.fail('处理消息时发生错误，请稍后重试。')
     }
   }
 
@@ -1628,7 +1945,7 @@ export class BotInstance {
     frame: any | undefined,
     responseRun: BotResponseRun
   ): Promise<void> {
-    const reporter = this.createProgressReporter(chatId, frame, responseRun)
+    const reporter = this.createProgressReporter(chatId, frame, responseRun, 'progressive')
     await reporter.start()
 
     try {
@@ -1636,6 +1953,13 @@ export class BotInstance {
         onToolStart: () => reporter.setPhase('tool'),
         onToolEnd: () => reporter.setPhase('organizing'),
         onOrganizing: () => reporter.setPhase('organizing'),
+        onStageStart: (stage) => {
+          if (stage === 'tool') reporter.setPhase('tool')
+          if (stage === 'model') reporter.setPhase('model')
+        },
+        onStageEnd: (stage) => {
+          if (stage === 'tool') reporter.setPhase('organizing')
+        },
       }))
       await this.saveMessages(chatKey, content, response, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, response)
@@ -1678,53 +2002,61 @@ export class BotInstance {
     frame: any | undefined,
     responseRun: BotResponseRun
   ): Promise<void> {
-    if (!frame) {
-      await this.handleNone(chatId, chatKey, content, sessionMessages, systemPrompt, tools, undefined, responseRun)
-      return
-    }
-
-    let streamId: string | undefined
-    try {
-      streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
-    } catch {
-      streamId = undefined
-    }
-
-    if (!streamId) {
-      await this.handleNone(chatId, chatKey, content, sessionMessages, systemPrompt, tools, frame, responseRun)
-      return
-    }
+    const reporter = this.createProgressReporter(chatId, frame, responseRun, 'typewriter')
+    await reporter.start()
+    const streamId = reporter.streamId
 
     let accumulated = ''
     let lastEditAt = 0
     let finalResponse = ''
 
     try {
-      finalResponse = safeReply(await this.engine!.invokeWithStream(sessionMessages, content, systemPrompt, tools, {
-        onToken: async (token) => {
-          accumulated += token
-          const now = Date.now()
-          if (now - lastEditAt >= TYPEWRITER_INTERVAL_MS) {
-            lastEditAt = now
-            await this.adapter.editMessage(chatId, streamId!, accumulated, false).catch(() => {})
-          }
-        },
-        onToolStart: async () => {
-          await this.adapter.editMessage(chatId, streamId!, STREAM_TOOL_MSG, false).catch(() => {})
-        },
-        onToolEnd: async () => {},
-        onOrganizing: async () => {},
-      }))
+      if (!streamId) {
+        // 无流式能力时降级为非流式调用，心跳走文本路径
+        finalResponse = safeReply(await this.engine!.invokeWithTools(sessionMessages, content, systemPrompt, tools, {
+          onStageStart: (stage) => {
+            if (stage === 'tool') reporter.setPhase('tool')
+            if (stage === 'model') reporter.setPhase('model')
+          },
+          onStageEnd: (stage) => {
+            if (stage === 'tool') reporter.setPhase('organizing')
+          },
+        }))
+      } else {
+        finalResponse = safeReply(await this.engine!.invokeWithStream(sessionMessages, content, systemPrompt, tools, {
+          onToken: async (token) => {
+            accumulated += token
+            const now = Date.now()
+            if (now - lastEditAt >= TYPEWRITER_INTERVAL_MS) {
+              lastEditAt = now
+              await this.adapter.editMessage(chatId, streamId, accumulated, false).catch(() => {})
+            }
+          },
+          onToolStart: async () => {
+            await this.adapter.editMessage(chatId, streamId, STREAM_TOOL_MSG, false).catch(() => {})
+          },
+          onToolEnd: async () => {},
+          onOrganizing: async () => {},
+          onStageStart: (stage) => {
+            if (stage === 'tool') reporter.setPhase('tool')
+            if (stage === 'model') reporter.setPhase('model')
+          },
+          onStageEnd: (stage) => {
+            if (stage === 'tool') reporter.setPhase('organizing')
+          },
+        }))
+      }
 
       await this.saveMessages(chatKey, content, finalResponse, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, finalResponse)
-      await this.finishTrackedReply(chatId, finalResponse, responseRun, streamId)
+      await reporter.finish(finalResponse)
     } catch (err: any) {
+      reporter.stop()
       if (err instanceof RecursionLimitError) {
         const response = safeReply(accumulated.trim() || err.summary)
         await this.saveMessages(chatKey, content, response, responseRun.id)
         await BotResponseRunRepository.markSent(responseRun.id, response)
-        await this.finishTrackedReply(chatId, response, responseRun, streamId)
+        await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
         return
       }
       if (Array.isArray(content) && isVisionFallbackError(err)) {
@@ -1734,7 +2066,7 @@ export class BotInstance {
           const response = await invokeVisionFallback(this.engine!, sessionMessages, content, systemPrompt, tools)
           await this.saveMessages(chatKey, degradeVisionContent(content), response, responseRun.id)
           await BotResponseRunRepository.markSent(responseRun.id, response)
-          await this.finishTrackedReply(chatId, response, responseRun, streamId)
+          await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
           return
         } catch {
           // fall through to generic error
@@ -1742,7 +2074,7 @@ export class BotInstance {
       }
 
       console.error(`[BotInstance:${this.deps.bot.id}] Agent error:`, err)
-      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun, streamId)
+      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun, reporter.streamId)
     }
   }
 
@@ -1755,25 +2087,23 @@ export class BotInstance {
     frame: any | undefined,
     responseRun: BotResponseRun
   ): Promise<void> {
-    let replyStreamId = streamId
-    if (!replyStreamId && frame) {
-      try {
-        replyStreamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
-      } catch {
-        replyStreamId = undefined
-      }
-    }
-    if (!replyStreamId) await this.adapter.sendMessage(chatId, THINKING_MESSAGE).catch(() => {})
+    const reporter = this.createProgressReporter(chatId, frame, responseRun, 'none')
+    await reporter.start()
+    const replyStreamId = reporter.streamId
     try {
+      await this.publishStageEvent(responseRun.id, 'dify', 'start')
+      await BotResponseRunRepository.updateStallPoint(responseRun.id, 'dify')
       const result = await this.difyClient!.chat(content, conversationId, chatKey)
       const answer = safeReply(result.answer)
+      await this.publishStageEvent(responseRun.id, 'dify', 'end')
       await this.sessions.setDifyConversationId(chatKey, result.conversationId)
       await this.saveMessages(chatKey, content, answer, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, answer, { difyConversationId: result.conversationId })
-      await this.finishTrackedReply(chatId, answer, responseRun, replyStreamId)
+      await reporter.finish(answer)
     } catch (err) {
+      reporter.stop()
       console.error(`[BotInstance:${this.deps.bot.id}] Dify error:`, err)
-      await this.sendRunErrorReply(chatId, '处理消息时发生错误，请稍后重试。', responseRun, replyStreamId)
+      await reporter.fail('处理消息时发生错误，请稍后重试。')
     }
   }
 
@@ -1785,28 +2115,29 @@ export class BotInstance {
     frame: any | undefined,
     responseRun: BotResponseRun
   ): Promise<void> {
-    if (!frame) {
-      await this.handleDify(chatId, chatKey, content, conversationId, undefined, undefined, responseRun)
-      return
-    }
-
-    let streamId: string | undefined
-    try {
-      streamId = await this.adapter.sendThinkingWithStream(frame, THINKING_MESSAGE, responseRun.feedbackId)
-    } catch {
-      streamId = undefined
-    }
-
-    if (!streamId) {
-      await this.handleDify(chatId, chatKey, content, conversationId, undefined, frame, responseRun)
-      return
-    }
+    const reporter = this.createProgressReporter(chatId, frame, responseRun, 'typewriter')
+    await reporter.start()
+    const streamId = reporter.streamId
 
     let accumulated = ''
     let lastEditAt = 0
     let streamStarted = false
 
     try {
+      if (!streamId) {
+        await this.publishStageEvent(responseRun.id, 'dify', 'start')
+        await BotResponseRunRepository.updateStallPoint(responseRun.id, 'dify')
+        const result = await this.difyClient!.chat(content, conversationId, chatKey)
+        const answer = safeReply(result.answer)
+        await this.publishStageEvent(responseRun.id, 'dify', 'end')
+        await this.sessions.setDifyConversationId(chatKey, result.conversationId)
+        await this.saveMessages(chatKey, content, answer, responseRun.id)
+        await BotResponseRunRepository.markSent(responseRun.id, answer, { difyConversationId: result.conversationId })
+        await reporter.finish(answer)
+        return
+      }
+      await this.publishStageEvent(responseRun.id, 'dify', 'start')
+      await BotResponseRunRepository.updateStallPoint(responseRun.id, 'dify')
       const result = await this.difyClient!.chatStream({
         content,
         conversationId,
@@ -1822,19 +2153,20 @@ export class BotInstance {
         },
       })
       const answer = safeReply(result.answer)
+      await this.publishStageEvent(responseRun.id, 'dify', 'end')
       await this.sessions.setDifyConversationId(chatKey, result.conversationId)
       await this.saveMessages(chatKey, content, answer, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, answer, { difyConversationId: result.conversationId })
-      await this.finishTrackedReply(chatId, answer, responseRun, streamId)
+      await reporter.finish(answer)
     } catch (err) {
+      reporter.stop()
       console.error(`[BotInstance:${this.deps.bot.id}] Dify streaming error:`, err)
       await BotResponseRunRepository.markError(responseRun.id, err instanceof Error ? err.message : String(err))
-      if (streamStarted) {
+      if (streamStarted && streamId) {
         await this.adapter.editMessage(chatId, streamId, `${accumulated}\n\n处理消息时发生错误，请稍后重试。`, true).catch(() => {})
         return
       }
-      await this.adapter.editMessage(chatId, streamId, '流式连接失败，正在切换为普通回复...', false).catch(() => {})
-      await this.handleDify(chatId, chatKey, content, conversationId, streamId, undefined, responseRun)
+      await reporter.fail('处理消息时发生错误，请稍后重试。')
     }
   }
 

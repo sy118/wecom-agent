@@ -218,6 +218,7 @@ export interface IncomingEvent {
 export type IncomingContent =
   | { type: 'text'; text: string }
   | { type: 'image'; url: string }
+  | { type: 'media'; mediaId: string; kind: WecomMediaKind; status?: WecomMediaStatus }
 
 export type WecomMediaType = 'file' | 'image' | 'voice' | 'video'
 
@@ -284,6 +285,8 @@ export interface BotResponseRun {
   error: string | null
   difyConversationId: string | null
   feedbackAvailable: boolean
+  stallPoint: StallPoint | null
+  lastActivityAt: number | null
   createdAt: number
   updatedAt: number
 }
@@ -485,4 +488,161 @@ export interface BotStatusEvent {
   botId: string
   status: BotStatus
   error?: string
+}
+
+// ─── 在线回复阶段事件（agent-response-ux）────────────────────────────────────
+
+export type RunStageName = 'queued' | 'thinking' | 'tool' | 'force-call-mcp' | 'dify' | 'model' | 'done'
+export type StallPoint = 'queued' | 'force-call-mcp' | 'tool' | 'dify' | 'model' | 'done'
+
+export interface RunStageEvent {
+  id: string
+  runId: string
+  stage: RunStageName
+  sequence: number
+  startedAt: number
+  endedAt: number | null
+  durationMs: number | null
+  meta: Record<string, any> | null
+}
+
+// ─── 企微媒体持久化（wecom-media-persistence）────────────────────────────────
+
+export type WecomMediaKind = 'image' | 'file' | 'video'
+export type WecomMediaStatus = 'pending' | 'ready' | 'expired'
+
+export interface WecomMedia {
+  id: string
+  kind: WecomMediaKind
+  mime: string | null
+  sizeBytes: number | null
+  sha256: string | null
+  storage: 'local' | 's3'
+  storageKey: string
+  sourceMessageId: string | null
+  sessionId: string | null
+  status: WecomMediaStatus
+  createdAt: number
+  expiresAt: number | null
+}
+
+export interface MediaStoreStat {
+  sizeBytes: number
+  mime: string | null
+  sha256: string | null
+}
+
+export interface MediaStore {
+  put(key: string, bytes: Uint8Array, meta?: { mime?: string | null }): Promise<MediaStoreStat>
+  get(key: string): Promise<Uint8Array | null>
+  delete(key: string): Promise<void>
+  exists(key: string): Promise<boolean>
+  stat(key: string): Promise<MediaStoreStat | null>
+}
+
+// ─── 企业产品化（enterprise-agent-productization）────────────────────────────
+
+export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired'
+
+export interface ApprovalRequest {
+  id: string
+  runId: string | null
+  tenantId: string
+  botId: string | null
+  toolName: string
+  scope: string | null
+  status: ApprovalStatus
+  requesterUserId: string | null
+  approverUserId: string | null
+  reason: string | null
+  decidedAt: number | null
+  createdAt: number
+  updatedAt: number
+}
+
+export interface WecomMcpToolMetadata {
+  module: string
+  name: string
+  description: string | null
+  scope: string | null
+  write: boolean
+  approvalRequired: boolean
+  enabled: boolean
+  tenantId: string
+  expiresAt: number | null
+}
+
+export interface AgentTemplateManifest {
+  name: string
+  description: string
+  category: string
+  skills: string[]
+  tools: Array<{ module: string; name: string }>
+  model: { provider: string; model: string } | null
+  triggers: string[]
+  policy: Record<string, any>
+}
+
+export interface AgentTemplate {
+  id: string
+  name: string
+  description: string
+  category: string
+  author: string | null
+  status: 'active' | 'draft' | 'archived'
+  tenantId: string
+  currentVersion: number
+  usageCount: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface TemplateRevision {
+  id: string
+  templateId: string
+  version: number
+  manifest: AgentTemplateManifest
+  createdAt: number
+}
+
+export interface TenantProfile {
+  id: string
+  name: string
+  status: 'active' | 'disabled'
+  createdAt: number
+  updatedAt: number
+}
+
+export interface UsageStatsRow {
+  tenantId: string
+  botId: string | null
+  skillId: string | null
+  templateId: string | null
+  taskCount: number
+  successCount: number
+  successRate: number
+  totalDurationMs: number
+  cost: number
+}
+
+export interface AuditLogRecordV2 {
+  id: string
+  tenantId: string
+  actorUserId: string | null
+  action: string
+  targetType: string | null
+  targetId: string | null
+  result: 'success' | 'failure' | 'denied'
+  reason: string | null
+  payload: Record<string, any>
+  createdAt: number
+}
+
+export interface OnboardingDraft {
+  id: string
+  tenantId: string
+  step: number
+  data: Record<string, any>
+  updatedAt: number
+  createdAt: number
 }

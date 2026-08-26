@@ -1,6 +1,6 @@
 import { ConfigProvider, Layout, Menu, Button, Space } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
-import { RobotOutlined, MessageOutlined, LogoutOutlined, CloudOutlined, ApiOutlined, ThunderboltOutlined, ScheduleOutlined, SettingOutlined, SafetyOutlined } from '@ant-design/icons'
+import { RobotOutlined, MessageOutlined, LogoutOutlined, CloudOutlined, ApiOutlined, ThunderboltOutlined, ScheduleOutlined, SettingOutlined, SafetyOutlined, ShopOutlined, CompassOutlined, ControlOutlined } from '@ant-design/icons'
 import { Outlet, useNavigate, useLocation } from 'react-router-dom'
 
 const { Sider, Header, Content } = Layout
@@ -11,6 +11,9 @@ function getSelectedKey(pathname: string): string {
   if (pathname.startsWith('/skills')) return 'skills'
   if (pathname.startsWith('/scheduled-tasks')) return 'scheduled-tasks'
   if (pathname.startsWith('/wecom-command-config')) return 'wecom-command-config'
+  if (pathname.startsWith('/templates')) return 'templates'
+  if (pathname.startsWith('/wizard')) return 'wizard'
+  if (pathname.startsWith('/admin')) return 'admin'
   if (pathname.startsWith('/settings')) return 'settings'
   return 'bots'
 }
@@ -68,6 +71,9 @@ export default function AppLayout() {
               { key: 'skills', icon: <ThunderboltOutlined />, label: '技能包', onClick: () => navigate('/skills') },
               { key: 'scheduled-tasks', icon: <ScheduleOutlined />, label: '定时任务', onClick: () => navigate('/scheduled-tasks') },
               { key: 'wecom-command-config', icon: <SafetyOutlined />, label: '企微命令权限', onClick: () => navigate('/wecom-command-config') },
+              { key: 'templates', icon: <ShopOutlined />, label: '模板市场', onClick: () => navigate('/templates') },
+              { key: 'wizard', icon: <CompassOutlined />, label: '配置向导', onClick: () => navigate('/wizard') },
+              { key: 'admin', icon: <ControlOutlined />, label: '管理控制台', onClick: () => navigate('/admin') },
               { key: 'settings', icon: <SettingOutlined />, label: '平台设置', onClick: () => navigate('/settings') },
               { type: 'divider' },
               { key: 'sessions', icon: <MessageOutlined />, label: '会话监控', onClick: () => navigate('/sessions') },

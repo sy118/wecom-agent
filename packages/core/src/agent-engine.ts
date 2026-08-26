@@ -139,6 +139,8 @@ export interface AgentProgressCallbacks {
   onToolStart?: () => void | Promise<void>
   onToolEnd?: () => void | Promise<void>
   onOrganizing?: () => void | Promise<void>
+  onStageStart?: (stage: string, meta?: Record<string, any>) => void | Promise<void>
+  onStageEnd?: (stage: string, meta?: Record<string, any>) => void | Promise<void>
 }
 
 export interface StreamCallbacks extends AgentProgressCallbacks {
@@ -215,17 +217,20 @@ function createToolLogHandler(callbacks: AgentProgressCallbacks = {}): BaseCallb
     async handleToolStart(tool: any, input: string) {
       console.log(`[AgentEngine] Tool call start: name=${tool?.name ?? 'unknown'} input=${input}`)
       await callbacks.onToolStart?.()
+      await callbacks.onStageStart?.('tool', { toolName: tool?.name ?? 'unknown' })
     }
     async handleToolEnd(output: string) {
       const preview = output.length > 100 ? output.slice(0, 100) + '...' : output
       console.log(`[AgentEngine] Tool call end: ${preview}`)
       await callbacks.onToolEnd?.()
       await callbacks.onOrganizing?.()
+      await callbacks.onStageEnd?.('tool')
     }
     async handleToolError(err: Error) {
       console.error(`[AgentEngine] Tool call error:`, err.message)
       await callbacks.onToolEnd?.()
       await callbacks.onOrganizing?.()
+      await callbacks.onStageEnd?.('tool', { error: err.message })
     }
   })()
 }
@@ -233,11 +238,11 @@ function createToolLogHandler(callbacks: AgentProgressCallbacks = {}): BaseCallb
 function buildHumanMessage(content: string | IncomingContent[]): HumanMessage {
   if (typeof content === 'string') return new HumanMessage(content)
   return new HumanMessage({
-    content: content.map((c) =>
-      c.type === 'text'
-        ? { type: 'text' as const, text: c.text }
-        : { type: 'image_url' as const, image_url: { url: c.url } }
-    ),
+    content: content.map((c) => {
+      if (c.type === 'text') return { type: 'text' as const, text: c.text }
+      if (c.type === 'image') return { type: 'image_url' as const, image_url: { url: c.url } }
+      return { type: 'text' as const, text: c.status === 'expired' ? '[媒体已过期]' : `[${c.kind}]` }
+    }),
   })
 }
 
@@ -323,6 +328,7 @@ export class AgentEngine {
     tools: StructuredTool[],
     callbacks: AgentProgressCallbacks = {}
   ): Promise<string> {
+    await callbacks.onStageStart?.('model', { tools: tools.length })
     const agent = this.createAgentWithTools(tools, systemPrompt)
     const history = this.buildHistory(sessionMessages, newContent)
     const timeoutMs = this.config.timeoutMs ?? DEFAULT_TIMEOUT_MS
@@ -364,6 +370,7 @@ export class AgentEngine {
       logMessageStructure('invokeWithTools', messages)
       const summary = await this.summarizePartialResult(messages, systemPrompt)
       console.log(`[AgentEngine] invokeWithTools result (first 200): ${summary.slice(0, 200)}`)
+      await callbacks.onStageEnd?.('model', { result: 'recursion_limit' })
       throw new RecursionLimitError(summary)
     }
 
@@ -371,7 +378,9 @@ export class AgentEngine {
     logMessageStructure('invokeWithTools', messages)
     const result = extractLastNonEmptyAiText(messages)
     console.log(`[AgentEngine] invokeWithTools result (first 200): ${result.slice(0, 200)}`)
-    return result ? result : await this.summarizePartialResult(messages, systemPrompt)
+    const finalResult = result ? result : await this.summarizePartialResult(messages, systemPrompt)
+    await callbacks.onStageEnd?.('model')
+    return finalResult
   }
 
   async invokeWithPrompt(
@@ -393,6 +402,7 @@ export class AgentEngine {
     tools: StructuredTool[],
     callbacks: StreamCallbacks
   ): Promise<string> {
+    await callbacks.onStageStart?.('model', { tools: tools.length })
     const agent = this.createAgentWithTools(tools, systemPrompt)
     let accumulated = ''
 
@@ -405,17 +415,20 @@ export class AgentEngine {
       async handleToolStart(tool: any, input: string) {
         console.log(`[AgentEngine] Tool call start: name=${tool?.name ?? 'unknown'} input=${input}`)
         await callbacks.onToolStart?.()
+        await callbacks.onStageStart?.('tool', { toolName: tool?.name ?? 'unknown' })
       }
       async handleToolEnd(output: string) {
         const preview = output.length > 100 ? output.slice(0, 100) + '...' : output
         console.log(`[AgentEngine] Tool call end: ${preview}`)
         await callbacks.onToolEnd?.()
         await callbacks.onOrganizing?.()
+        await callbacks.onStageEnd?.('tool')
       }
       async handleToolError(err: Error) {
         console.error(`[AgentEngine] Tool call error:`, err.message)
         await callbacks.onToolEnd?.()
         await callbacks.onOrganizing?.()
+        await callbacks.onStageEnd?.('tool', { error: err.message })
       }
     })()
 
@@ -454,14 +467,20 @@ export class AgentEngine {
       logMessageStructure('invokeWithStream', messages)
       const result = extractLastNonEmptyAiText(messages)
       const summary = result ? result : await this.summarizePartialResult(messages, systemPrompt)
+      await callbacks.onStageEnd?.('model', { result: 'recursion_limit' })
       throw new RecursionLimitError(accumulated.trim() || summary)
     }
 
-    if (accumulated.trim()) return accumulated.trim()
+    if (accumulated.trim()) {
+      await callbacks.onStageEnd?.('model')
+      return accumulated.trim()
+    }
     const messages = collectedMessages.length > 0 ? collectedMessages : history
     logMessageStructure('invokeWithStream', messages)
     const result = extractLastNonEmptyAiText(messages)
-    return result ? result : await this.summarizePartialResult(messages, systemPrompt)
+    const finalResult = result ? result : await this.summarizePartialResult(messages, systemPrompt)
+    await callbacks.onStageEnd?.('model')
+    return finalResult
   }
 
   private buildHistory(sessionMessages: SessionMessage[], newContent: string | IncomingContent[]): BaseMessage[] {

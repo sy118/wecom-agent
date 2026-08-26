@@ -1,6 +1,6 @@
 import { randomUUID } from 'crypto'
 import { db } from './client.js'
-import type { BotProvider, BotResponseRun, BotResponseRunStatus } from '@wecom-platform/types'
+import type { BotProvider, BotResponseRun, BotResponseRunStatus, StallPoint } from '@wecom-platform/types'
 
 function boolValue(value: unknown): boolean {
   return Number(value ?? 0) === 1
@@ -24,12 +24,22 @@ function rowToRun(row: Record<string, unknown>): BotResponseRun {
     error: (row.error as string | null) ?? null,
     difyConversationId: (row.dify_conversation_id as string | null) ?? null,
     feedbackAvailable: boolValue(row.feedback_available),
+    stallPoint: (row.stall_point as StallPoint | null) ?? null,
+    lastActivityAt: (row.last_activity_at as number | null) ?? null,
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
   }
 }
 
 export const BotResponseRunRepository = {
+  async findAll(limit = 100): Promise<BotResponseRun[]> {
+    const res = await db.execute({
+      sql: 'SELECT * FROM bot_response_runs ORDER BY created_at DESC LIMIT ?',
+      args: [limit],
+    })
+    return res.rows.map(rowToRun)
+  },
+
   async create(data: {
     feedbackId?: string | null
     botId: string
@@ -110,6 +120,25 @@ export const BotResponseRunRepository = {
       args: [error ?? null, now, id],
     })
     return this.findById(id)
+  },
+
+  async updateStallPoint(id: string, stallPoint: StallPoint): Promise<BotResponseRun | null> {
+    const now = Date.now()
+    await db.execute({
+      sql: `UPDATE bot_response_runs
+            SET stall_point = ?, last_activity_at = ?, updated_at = ?
+            WHERE id = ?`,
+      args: [stallPoint, now, now, id],
+    })
+    return this.findById(id)
+  },
+
+  async touchActivity(id: string): Promise<void> {
+    const now = Date.now()
+    await db.execute({
+      sql: `UPDATE bot_response_runs SET last_activity_at = ?, updated_at = ? WHERE id = ?`,
+      args: [now, now, id],
+    })
   },
 }
 

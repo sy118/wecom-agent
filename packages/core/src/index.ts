@@ -15,3 +15,6 @@ export {
 export type { SkillRuntimeContext, SkillScriptExecutionInput, SkillScriptToolInput } from './skill-runner.js'
 export { WecomAdapter, resolveChatKey, parseWecomEventBody } from './wecom-adapter.js'
 export type { WecomCredentials } from './wecom-adapter.js'
+export { decryptWecomImage } from './wecom-adapter.js'
+export { createMediaStore, generateMediaId, mediaExtension, LocalMediaStore, S3MediaStore } from './media-store.js'
+export type { S3MediaStoreConfig } from './media-store.js'

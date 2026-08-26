@@ -335,6 +335,113 @@ export async function initDb(): Promise<void> {
       created_at INTEGER NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS wecom_media (
+      id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      mime TEXT,
+      size_bytes INTEGER,
+      sha256 TEXT,
+      storage TEXT NOT NULL DEFAULT 'local',
+      storage_key TEXT NOT NULL,
+      source_message_id TEXT,
+      session_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at INTEGER NOT NULL,
+      expires_at INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS run_stage_events (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL REFERENCES bot_response_runs(id) ON DELETE CASCADE,
+      stage TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      started_at INTEGER NOT NULL,
+      ended_at INTEGER,
+      duration_ms INTEGER,
+      meta TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS tenant_profiles (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_templates (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      category TEXT NOT NULL DEFAULT 'general',
+      author TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      tenant_id TEXT NOT NULL DEFAULT 'default',
+      current_version INTEGER NOT NULL DEFAULT 1,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS template_revisions (
+      id TEXT PRIMARY KEY,
+      template_id TEXT NOT NULL REFERENCES agent_templates(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      manifest_json TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      UNIQUE(template_id, version)
+    );
+
+    CREATE TABLE IF NOT EXISTS approval_requests (
+      id TEXT PRIMARY KEY,
+      run_id TEXT,
+      tenant_id TEXT NOT NULL DEFAULT 'default',
+      bot_id TEXT,
+      tool_name TEXT NOT NULL,
+      scope TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      requester_user_id TEXT,
+      approver_user_id TEXT,
+      reason TEXT,
+      decided_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS wecom_mcp_tools (
+      id TEXT PRIMARY KEY,
+      module TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      scope TEXT,
+      write_flag INTEGER NOT NULL DEFAULT 0,
+      approval_required INTEGER NOT NULL DEFAULT 1,
+      enabled INTEGER NOT NULL DEFAULT 1,
+      tenant_id TEXT NOT NULL DEFAULT 'default',
+      expires_at INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(tenant_id, module, name)
+    );
+
+    CREATE TABLE IF NOT EXISTS onboarding_drafts (
+      id TEXT PRIMARY KEY,
+      tenant_id TEXT NOT NULL DEFAULT 'default',
+      step INTEGER NOT NULL DEFAULT 1,
+      data TEXT NOT NULL DEFAULT '{}',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS bot_triggers (
+      id TEXT PRIMARY KEY,
+      bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+      tenant_id TEXT NOT NULL DEFAULT 'default',
+      trigger TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      UNIQUE(tenant_id, trigger)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_wecom_events_event_type_created
       ON wecom_events(event_type, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_wecom_events_bot_created
@@ -365,6 +472,22 @@ export async function initDb(): Promise<void> {
       ON generation_tasks(bot_id, owner_user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_generated_files_token
       ON generated_files(access_token, expires_at);
+    CREATE INDEX IF NOT EXISTS idx_wecom_media_session
+      ON wecom_media(session_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_run_stage_events_run
+      ON run_stage_events(run_id, sequence);
+    CREATE INDEX IF NOT EXISTS idx_agent_templates_category
+      ON agent_templates(category, status);
+    CREATE INDEX IF NOT EXISTS idx_template_revisions_template
+      ON template_revisions(template_id, version);
+    CREATE INDEX IF NOT EXISTS idx_approval_requests_status
+      ON approval_requests(tenant_id, status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_wecom_mcp_tools_tenant
+      ON wecom_mcp_tools(tenant_id, enabled);
+    CREATE INDEX IF NOT EXISTS idx_onboarding_drafts_tenant
+      ON onboarding_drafts(tenant_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_bot_triggers_tenant
+      ON bot_triggers(tenant_id, trigger);
 
     UPDATE bots SET status = 'stopped' WHERE status = 'running';
   `)
@@ -384,6 +507,16 @@ export async function initDb(): Promise<void> {
   await addColumnIfMissing('skills', 'permission_policy', "TEXT NOT NULL DEFAULT '{}'")
   await addColumnIfMissing('session_messages', 'response_run_id', 'TEXT')
   await addColumnIfMissing('generation_tasks', 'preview_summary', 'TEXT')
+  await addColumnIfMissing('bot_response_runs', 'stall_point', 'TEXT')
+  await addColumnIfMissing('bot_response_runs', 'last_activity_at', 'INTEGER')
+  await addColumnIfMissing('bot_response_runs', 'tenant_id', "TEXT NOT NULL DEFAULT 'default'")
+  await addColumnIfMissing('bot_response_runs', 'cost', 'REAL')
+  await addColumnIfMissing('bot_response_runs', 'template_id', 'TEXT')
+  await addColumnIfMissing('bot_response_runs', 'skill_id', 'TEXT')
+  await addColumnIfMissing('bots', 'tenant_id', "TEXT NOT NULL DEFAULT 'default'")
+  await addColumnIfMissing('sessions', 'tenant_id', "TEXT NOT NULL DEFAULT 'default'")
+  await addColumnIfMissing('audit_logs', 'tenant_id', "TEXT NOT NULL DEFAULT 'default'")
+  await addColumnIfMissing('wecom_media', 'tenant_id', "TEXT NOT NULL DEFAULT 'default'")
   await seedDefaultSessionTtlSetting()
   await migrateAllowedProjects()
   await migrateScheduledTasksBotIdNullable()
