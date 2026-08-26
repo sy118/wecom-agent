@@ -35,7 +35,7 @@ function rowToStat(row: Record<string, unknown>, tenantId: string, key: string, 
     templateId: key === 'template' ? value : null,
     taskCount,
     successCount,
-    successRate: taskCount > 0 ? Math.round((successCount / taskCount) * 10000) / 100 : 0,
+    successRate: taskCount > 0 ? Math.round((successCount / taskCount) * 10000) / 10000 : 0,
     totalDurationMs,
     cost: Math.round(totalDurationMs * COST_PER_MS * 100) / 100,
   }
@@ -66,7 +66,7 @@ export async function getUsageBreakdown(filter: UsageFilter): Promise<UsageBreak
           FROM bot_response_runs r
           LEFT JOIN bot_triggers bt ON bt.bot_id = r.bot_id
           LEFT JOIN agent_templates t ON t.name = bt.trigger AND t.tenant_id = r.tenant_id
-          WHERE ${whereSql}
+          WHERE ${whereSql.replaceAll('tenant_id', 'r.tenant_id').replaceAll('bot_id', 'r.bot_id').replaceAll('created_at', 'r.created_at')}
           GROUP BY t.id ORDER BY task_count DESC LIMIT ?`,
     args: [...args, limit],
   })

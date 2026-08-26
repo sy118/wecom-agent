@@ -7,17 +7,36 @@ import test, { after, before } from 'node:test'
 const tempDir = await mkdtemp(join(tmpdir(), 'wecom-usage-stats-'))
 process.env.DB_PATH = join(tempDir, 'usage-test.db')
 
-const [{ initDb, db }, { BotResponseRunRepository }, { getUsageBreakdown }, { TemplateRepository }] = await Promise.all([
+const [{ initDb, db }, { BotResponseRunRepository }, { getUsageBreakdown }, { TemplateRepository }, { BotRepository }] = await Promise.all([
   import('../db/client.js'),
   import('../db/bot-response-run-repository.js'),
   import('./usage-stats-service.js'),
   import('../db/template-repository.js'),
+  import('../db/bot-repository.js'),
 ])
+
+let botId = ''
 
 before(async () => {
   await initDb()
+  const bot = await BotRepository.create({
+    name: '统计 Bot',
+    wecomBotId: 'usage-stats-wecom-1',
+    wecomBotSecret: 'secret',
+    wecomWsUrl: 'wss://example.invalid/ws',
+    llmApiKey: 'key',
+    llmBaseUrl: 'https://llm.example.invalid/v1',
+    llmModel: 'test-model',
+    provider: 'openai-compatible',
+    streamingMode: 'none',
+    difyBaseUrl: null,
+    difyApiKey: null,
+    difyAppId: null,
+    visionEnabled: false,
+  })
+  botId = bot.id
   const run = await BotResponseRunRepository.create({
-    botId: 'bot-stats-1',
+    botId,
     chatKey: 'wecom:user:u1',
     chatId: 'u1',
     userId: 'u1',
@@ -55,7 +74,7 @@ test('4.4 按 Bot 聚合任务量、成功率与耗时', async () => {
   const breakdown = await getUsageBreakdown({ tenantId: 'tenant-stats' })
   assert.equal(breakdown.byBot.length, 1)
   const row = breakdown.byBot[0]
-  assert.equal(row.botId, 'bot-stats-1')
+  assert.equal(row.botId, botId)
   assert.equal(row.taskCount, 1)
   assert.equal(row.successCount, 1)
   assert.equal(row.successRate, 1)

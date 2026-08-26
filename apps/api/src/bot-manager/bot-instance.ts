@@ -1351,15 +1351,17 @@ export class BotInstance {
       return
     }
 
-    const disturbance = this.disturbanceService.decide({
-      chatType: msg.chatType === 'group' ? 'group' : 'user',
-      message: this.rawTextOf(msg) ?? '',
-      botName: this.deps.bot.name,
-      chatKey,
-    })
-    if (!disturbance.shouldReply) {
-      console.log(`[BotInstance:${this.deps.bot.id}] Disturbance suppressed (${disturbance.reason}) for ${chatKey}`)
-      return
+    if (process.env.WECOM_DND_ENABLED === 'true') {
+      const disturbance = this.disturbanceService.decide({
+        chatType: msg.chatType === 'group' ? 'group' : 'user',
+        message: this.rawTextOf(msg) ?? '',
+        botName: this.deps.bot.name,
+        chatKey,
+      })
+      if (!disturbance.shouldReply) {
+        console.log(`[BotInstance:${this.deps.bot.id}] Disturbance suppressed (${disturbance.reason}) for ${chatKey}`)
+        return
+      }
     }
 
     const resolvedContext = await this.resolveEffectiveContext(chatKey, msg.userId)
@@ -1522,10 +1524,13 @@ export class BotInstance {
       }
     }
     await this.adapter.sendMessage(chatId, text).catch(() => {})
-    await BotResponseRunRepository.markFeedbackUnavailable(
-      responseRun.id,
-      streamId ? 'feedback stream finish failed; sent fallback message' : 'no feedback-capable stream'
-    )
+    const run = await BotResponseRunRepository.findById(responseRun.id)
+    if (run?.status === 'pending') {
+      await BotResponseRunRepository.markFeedbackUnavailable(
+        responseRun.id,
+        streamId ? 'feedback stream finish failed; sent fallback message' : 'no feedback-capable stream'
+      )
+    }
   }
 
   private async publishStageEvent(

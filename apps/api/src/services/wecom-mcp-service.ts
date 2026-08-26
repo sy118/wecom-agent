@@ -47,7 +47,7 @@ export const WECOM_MCP_TOOL_CATALOG: WecomMcpToolDefinition[] = [
   { module: '表格', name: 'sheet.summary', description: '汇总表格数据', scope: 'sheet:read', write: false, approvalRequired: false },
   { module: '表格', name: 'sheet.update', description: '更新表格单元格', scope: 'sheet:write', write: true, approvalRequired: true },
   { module: '邮件', name: 'mail.list', description: '查询邮件', scope: 'mail:read', write: false, approvalRequired: false },
-  { module: '邮件', name: 'mail.draft', description: '生成邮件草稿', scope: 'mail:write', write: true, approvalRequired: false },
+  { module: '邮件', name: 'mail.draft', description: '生成邮件草稿', scope: 'mail:write', write: false, approvalRequired: false },
   { module: '邮件', name: 'mail.send', description: '发送邮件', scope: 'mail:write', write: true, approvalRequired: true },
   { module: '会议', name: 'meeting.list', description: '查询会议', scope: 'meeting:read', write: false, approvalRequired: false },
   { module: '会议', name: 'meeting.create', description: '创建会议', scope: 'meeting:write', write: true, approvalRequired: true },

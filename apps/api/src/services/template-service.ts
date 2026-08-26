@@ -130,6 +130,7 @@ export async function seedBuiltinTemplates(tenantId: string): Promise<AgentTempl
 export function exportTemplateJson(template: AgentTemplate, revisions: TemplateRevision[]): Record<string, unknown> {
   const latest = revisions.find((r) => r.version === template.currentVersion)
   return {
+    format: 'wecom-agent-template',
     schemaVersion: 1,
     template: {
       name: template.name,
