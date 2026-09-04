@@ -1,3 +1,9 @@
 packages:
   - 'apps/*'
   - 'packages/*'
+
+# pnpm 10.34+ build-script allowlist. These packages need their native/binary
+# install steps for better-sqlite3 at runtime and esbuild during web builds.
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true

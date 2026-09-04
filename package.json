@@ -3,6 +3,7 @@
   "version": "2.1.1",
   "description": "Multi-bot WeChat Work AI assistant platform",
   "private": true,
+  "packageManager": "pnpm@10.34.5",
   "scripts": {
     "dev:api": "pnpm --filter @wecom-platform/api dev",
     "dev:web": "pnpm --filter @wecom-platform/web dev",

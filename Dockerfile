@@ -3,7 +3,7 @@ ARG NODE_IMAGE=refujmaui99ffeuuaf.xuanyuan.run/library/node:20-alpine
 FROM ${NODE_IMAGE} AS builder
 WORKDIR /app
 
-RUN npm install -g pnpm
+RUN npm install -g pnpm@10.34.5
 
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
 COPY packages/types/package.json ./packages/types/
@@ -30,7 +30,7 @@ ENV NODE_ENV=production
 ENV WEB_DIST_DIR=/app/apps/web/dist
 
 RUN apk add --no-cache git
-RUN npm install -g pnpm
+RUN npm install -g pnpm@10.34.5
 
 COPY package.json pnpm-workspace.yaml pnpm-lock.yaml .npmrc ./
 COPY packages/types/package.json ./packages/types/
