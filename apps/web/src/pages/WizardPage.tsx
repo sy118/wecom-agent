@@ -76,6 +76,7 @@ export default function WizardPage() {
     const values = form.getFieldsValue()
     try {
       const result = await wizardApi.test({
+        message: testPrompt.trim(),
         name: values.name ?? '测试 Bot',
         model: values.model ?? null,
         skills: values.skills ?? [],
@@ -162,7 +163,10 @@ export default function WizardPage() {
               <Card size="small" style={{ marginTop: 16 }}>
                 <Space direction="vertical">
                   <div><strong>回复：</strong>{testResult.reply}</div>
-                  <div><strong>阶段：</strong>{testResult.stages?.map((s: any, i: number) => <Tag key={i}>{s.stage}:{s.status}</Tag>)}</div>
+                  <div><strong>阶段：</strong>{testResult.stages?.map((s: any, i: number) => {
+                    const label = typeof s === 'string' ? s : `${s.stage ?? 'unknown'}:${s.status ?? 'unknown'}`
+                    return <Tag key={i}>{label}</Tag>
+                  })}</div>
                 </Space>
               </Card>
             )}

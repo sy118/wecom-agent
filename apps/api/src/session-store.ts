@@ -26,6 +26,13 @@ export class SessionStore {
     this.cleanupInterval = setInterval(() => this.cleanup(), 60_000)
   }
 
+  private async resolveSessionId(sessionIdOrChatKey: string): Promise<string | null> {
+    const direct = await this.db.execute({ sql: 'SELECT id FROM sessions WHERE bot_id = ? AND id = ? AND expires_at > ?', args: [this.botId, sessionIdOrChatKey, Date.now()] })
+    if (direct.rows[0]) return direct.rows[0].id as string
+    const legacy = await this.db.execute({ sql: 'SELECT id FROM sessions WHERE bot_id = ? AND chat_key = ? AND expires_at > ? ORDER BY last_active_at DESC LIMIT 1', args: [this.botId, sessionIdOrChatKey, Date.now()] })
+    return legacy.rows[0] ? legacy.rows[0].id as string : null
+  }
+
   async getOrCreate(chatKey: string, contextId: string, ttlMin: number): Promise<Session> {
     const now = Date.now()
     const result = await this.db.execute({
@@ -81,27 +88,19 @@ export class SessionStore {
     return { id: sessionId, chatKey, contextId, messages: [], lastActiveAt: now, expiresAt }
   }
 
-  async addMessage(chatKey: string, message: SessionMessage, responseRunId?: string | null): Promise<void> {
+  async addMessage(sessionId: string, message: SessionMessage, responseRunId?: string | null): Promise<void> {
     const now = Date.now()
-    const sessionResult = await this.db.execute({
-      sql: `SELECT id FROM sessions
-            WHERE bot_id = ? AND chat_key = ? AND expires_at > ?
-            ORDER BY last_active_at DESC
-            LIMIT 1`,
-      args: [this.botId, chatKey, now],
-    })
-    if (sessionResult.rows.length === 0) return
-
-    const sessionId = sessionResult.rows[0].id as string
+    const resolvedSessionId = await this.resolveSessionId(sessionId)
+    if (!resolvedSessionId) return
 
     await this.db.execute({
       sql: 'INSERT INTO session_messages (id, session_id, role, content, timestamp, response_run_id) VALUES (?, ?, ?, ?, ?, ?)',
-      args: [randomUUID(), sessionId, message.role, serializeContent(message.content), message.timestamp, responseRunId ?? message.responseRunId ?? null],
+      args: [randomUUID(), resolvedSessionId, message.role, serializeContent(message.content), message.timestamp, responseRunId ?? message.responseRunId ?? null],
     })
 
     const countResult = await this.db.execute({
       sql: 'SELECT COUNT(*) as cnt FROM session_messages WHERE session_id = ?',
-      args: [sessionId],
+      args: [resolvedSessionId],
     })
     const count = countResult.rows[0].cnt as number
     if (count > MAX_MESSAGES) {
@@ -109,26 +108,22 @@ export class SessionStore {
         sql: `DELETE FROM session_messages WHERE session_id = ? AND id IN (
           SELECT id FROM session_messages WHERE session_id = ? ORDER BY timestamp ASC LIMIT ?
         )`,
-        args: [sessionId, sessionId, count - MAX_MESSAGES],
+        args: [resolvedSessionId, resolvedSessionId, count - MAX_MESSAGES],
       })
     }
 
     await this.db.execute({
       sql: 'UPDATE sessions SET last_active_at = ? WHERE id = ? AND bot_id = ?',
-      args: [now, sessionId, this.botId],
+      args: [now, resolvedSessionId, this.botId],
     })
   }
 
-  async setDifyConversationId(chatKey: string, conversationId: string): Promise<void> {
+  async setDifyConversationId(sessionId: string, conversationId: string): Promise<void> {
+    const resolvedSessionId = await this.resolveSessionId(sessionId)
+    if (!resolvedSessionId) return
     await this.db.execute({
-      sql: `UPDATE sessions SET dify_conversation_id = ?
-            WHERE id = (
-              SELECT id FROM sessions
-              WHERE bot_id = ? AND chat_key = ? AND expires_at > ?
-              ORDER BY last_active_at DESC
-              LIMIT 1
-            )`,
-      args: [conversationId, this.botId, chatKey, Date.now()],
+      sql: 'UPDATE sessions SET dify_conversation_id = ? WHERE bot_id = ? AND id = ?',
+      args: [conversationId, this.botId, resolvedSessionId],
     })
   }
 

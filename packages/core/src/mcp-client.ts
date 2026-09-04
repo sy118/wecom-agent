@@ -3,7 +3,8 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { loadMcpTools } from '@langchain/mcp-adapters'
-import type { McpServerConfig } from '@wecom-platform/types'
+import type { McpServerConfig, McpServerTransportType, McpProbeResult, McpProbeStageResult } from '@wecom-platform/types'
+export type { McpProbeResult, McpProbeStageResult } from '@wecom-platform/types'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { StructuredTool } from '@langchain/core/tools'
 
@@ -67,10 +68,40 @@ function processEnvironment(): Record<string, string> {
   return env
 }
 
+function sanitizeError(error: unknown, server?: McpServerConfig): string {
+  const text = error instanceof Error ? error.message : String(error)
+  let sanitized = text
+    .replace(/(authorization|token|secret|password|api[-_]?key)\s*[:=]\s*[^\s,;]+/gi, '$1=[redacted]')
+    .replace(/Bearer\s+[^\s]+/gi, 'Bearer [redacted]')
+  // Do not return literal configured credentials if an SDK includes request
+  // headers, command arguments, or an endpoint in its error text.
+  const sensitiveValues = new Set<string>()
+  for (const value of Object.values(server?.headers ?? {})) {
+    if (!value.includes('${') && value.length > 2) sensitiveValues.add(value)
+  }
+  for (const value of Object.values(server?.env ?? {})) {
+    if (!value.includes('${') && value.length > 2) sensitiveValues.add(value)
+    const match = value.match(/^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/)
+    const resolved = match ? process.env[match[1]] : undefined
+    if (resolved && resolved.length > 2) sensitiveValues.add(resolved)
+  }
+  for (const value of sensitiveValues) sanitized = sanitized.split(value).join('[redacted]')
+  try {
+    const parsed = new URL(sanitized)
+    for (const key of parsed.searchParams.keys()) parsed.searchParams.set(key, '[redacted]')
+    sanitized = parsed.toString()
+  } catch {
+    // Error text is not necessarily a URL.
+  }
+  return sanitized
+}
+
 export function createMcpTransport(server: McpServerConfig): Transport {
   if (server.transportType === 'sse') {
     if (!server.url) throw new Error('SSE MCP server url is required')
-    return new SSEClientTransport(new URL(server.url))
+    return new SSEClientTransport(new URL(server.url), {
+      requestInit: { headers: resolveStringRecord(server.headers) },
+    })
   }
 
   if (server.transportType === 'stdio') {
@@ -138,6 +169,87 @@ export async function createMcpToolClient(
   } catch (err) {
     await close()
     throw err
+  }
+}
+
+export async function probeMcpServer(
+  server: McpServerConfig,
+  options: CreateMcpToolClientOptions = {}
+): Promise<McpProbeResult> {
+  const startedAt = Date.now()
+  const stages: McpProbeStageResult[] = []
+  let transport: Transport | undefined
+  let client: Client | undefined
+  let tools: StructuredTool[] = []
+  let ok = true
+
+  const stage = async <T>(name: McpProbeStageResult['name'], action: () => Promise<T> | T): Promise<T | undefined> => {
+    const stageStartedAt = Date.now()
+    try {
+      const value = await action()
+      stages.push({ name, status: 'success', durationMs: Date.now() - stageStartedAt })
+      return value
+    } catch (error) {
+      ok = false
+      stages.push({ name, status: 'failed', durationMs: Date.now() - stageStartedAt, error: sanitizeError(error, server) })
+      return undefined
+    }
+  }
+
+  await stage('validate', () => {
+    if (!server.id || !server.name) throw new Error('MCP server id and name are required')
+    if (!['sse', 'stdio', 'streamable-http'].includes(server.transportType)) throw new Error('Unsupported MCP transport type')
+    if (server.transportType === 'stdio' ? !server.command : !server.url) throw new Error('MCP connection endpoint is required')
+  })
+
+  if (ok) {
+    transport = await stage('connect', () => {
+      const created = createMcpTransport(server)
+      client = new Client({ name: `wecom-platform-probe-${server.name}`, version: '1.0.0' }, { capabilities: {} })
+      return created
+    })
+    if (transport && client) {
+      const timeoutMs = options.connectTimeoutMs ?? configuredTimeout('MCP_CONNECT_TIMEOUT_MS', DEFAULT_CONNECT_TIMEOUT_MS)
+      await stage('initialize', () => withTimeout(client!.connect(transport!), timeoutMs, `MCP initialize ${server.name}`, async () => {
+        await (transport as any)?.close?.().catch?.(() => {})
+      }))
+    } else {
+      stages.push({ name: 'initialize', status: 'skipped', durationMs: 0 })
+    }
+  } else {
+    stages.push({ name: 'connect', status: 'skipped', durationMs: 0 })
+    stages.push({ name: 'initialize', status: 'skipped', durationMs: 0 })
+  }
+
+  if (ok && client) {
+    const loaded = await stage('list-tools', async () => {
+      const timeoutMs = options.loadToolsTimeoutMs ?? configuredTimeout('MCP_LOAD_TOOLS_TIMEOUT_MS', DEFAULT_LOAD_TOOLS_TIMEOUT_MS)
+      return withTimeout(loadMcpTools(server.name, client!, { defaultToolTimeout: options.toolTimeoutMs ?? configuredTimeout('MCP_TOOL_TIMEOUT_MS', DEFAULT_TOOL_TIMEOUT_MS) }), timeoutMs, `MCP load tools ${server.name}`)
+    })
+    tools = loaded ?? []
+  } else {
+    stages.push({ name: 'list-tools', status: 'skipped', durationMs: 0 })
+  }
+
+  const closeStartedAt = Date.now()
+  try {
+    await client?.close().catch(() => {})
+    await (transport as any)?.close?.().catch?.(() => {})
+    stages.push({ name: 'close', status: 'success', durationMs: Date.now() - closeStartedAt })
+  } catch (error) {
+    ok = false
+    stages.push({ name: 'close', status: 'failed', durationMs: Date.now() - closeStartedAt, error: sanitizeError(error, server) })
+  }
+
+  return {
+    ok,
+    serverId: server.id,
+    serverName: server.name,
+    transportType: server.transportType,
+    totalDurationMs: Date.now() - startedAt,
+    stages,
+    toolCount: tools.length,
+    toolNames: tools.map((tool) => tool.name),
   }
 }
 

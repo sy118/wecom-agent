@@ -31,6 +31,7 @@ export async function initDb(): Promise<void> {
       dify_api_key TEXT,
       dify_app_id TEXT,
       vision_enabled INTEGER NOT NULL DEFAULT 0,
+      allow_unbound_access INTEGER NOT NULL DEFAULT 1,
       status TEXT NOT NULL DEFAULT 'stopped',
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
@@ -514,6 +515,7 @@ export async function initDb(): Promise<void> {
   await addColumnIfMissing('bot_response_runs', 'template_id', 'TEXT')
   await addColumnIfMissing('bot_response_runs', 'skill_id', 'TEXT')
   await addColumnIfMissing('bots', 'tenant_id', "TEXT NOT NULL DEFAULT 'default'")
+  await addColumnIfMissing('bots', 'allow_unbound_access', 'INTEGER NOT NULL DEFAULT 1')
   await addColumnIfMissing('sessions', 'tenant_id', "TEXT NOT NULL DEFAULT 'default'")
   await addColumnIfMissing('audit_logs', 'tenant_id', "TEXT NOT NULL DEFAULT 'default'")
   await addColumnIfMissing('wecom_media', 'tenant_id', "TEXT NOT NULL DEFAULT 'default'")

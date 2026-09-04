@@ -85,6 +85,9 @@ botsRouter.put('/:id', async (req, res) => {
       return
     }
   }
+  if (req.body.allowUnboundAccess !== undefined) {
+    botManager.updateAccessPolicy(req.params.id, bot.allowUnboundAccess !== false)
+  }
   res.json(bot)
 })
 

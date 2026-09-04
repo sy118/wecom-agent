@@ -142,6 +142,10 @@ export class BotManager extends EventEmitter {
     this.instances.get(botId)?.updateBinding(chatKey, contextId)
   }
 
+  updateAccessPolicy(botId: string, allowUnboundAccess: boolean): void {
+    this.instances.get(botId)?.updateAccessPolicy(allowUnboundAccess)
+  }
+
   upsertContext(botId: string, context: ContextConfig): void {
     this.instances.get(botId)?.upsertContext(context)
   }

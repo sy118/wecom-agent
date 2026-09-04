@@ -18,6 +18,8 @@ export interface BotConfig {
   difyApiKey: string | null
   difyAppId: string | null
   visionEnabled: boolean
+  /** Defaults to true for legacy callers and migrated bots. */
+  allowUnboundAccess?: boolean
   status: BotStatus
   createdAt: number
   updatedAt: number
@@ -159,6 +161,24 @@ export interface McpServerConfig {
   env?: Record<string, string>
   headers?: Record<string, string>
   paramSchema?: ParamSchemaItem[]
+}
+
+export interface McpProbeStageResult {
+  name: 'validate' | 'connect' | 'initialize' | 'list-tools' | 'close'
+  status: 'success' | 'failed' | 'skipped'
+  durationMs: number
+  error?: string
+}
+
+export interface McpProbeResult {
+  ok: boolean
+  serverId: string
+  serverName: string
+  transportType: McpServerTransportType
+  totalDurationMs: number
+  stages: McpProbeStageResult[]
+  toolCount: number
+  toolNames: string[]
 }
 
 // ─── Session ──────────────────────────────────────────────────────────────────
@@ -346,7 +366,7 @@ export interface ContextAccessGrant {
 }
 
 export type ActiveContextScope = 'user_in_chat' | 'chat'
-export type ActiveContextSource = 'runtime' | 'binding' | 'default'
+export type ActiveContextSource = 'runtime' | 'binding' | 'unbound' | 'default'
 
 export interface ActiveContext {
   id: string

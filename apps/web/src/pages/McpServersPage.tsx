@@ -16,12 +16,23 @@ interface McpServer {
   headers?: Record<string, string>
   paramSchema?: ParamSchemaItem[]
 }
+interface McpProbeResult {
+  ok: boolean
+  serverName: string
+  transportType: string
+  totalDurationMs: number
+  toolCount: number
+  toolNames: string[]
+  stages: Array<{ name: string; status: string; durationMs: number; error?: string }>
+}
 
 export default function McpServersPage() {
   const [servers, setServers] = useState<McpServer[]>([])
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editServer, setEditServer] = useState<McpServer | null>(null)
+  const [testingId, setTestingId] = useState<string | null>(null)
+  const [probeResult, setProbeResult] = useState<McpProbeResult | null>(null)
   const [form] = Form.useForm()
 
   const load = async () => {
@@ -102,6 +113,13 @@ export default function McpServersPage() {
     message.success('已删除'); load()
   }
 
+  const handleTest = async (server: McpServer) => {
+    setTestingId(server.id)
+    try { setProbeResult(await mcpServersApi.test(server.id)) }
+    catch (error: any) { message.error(error?.response?.data?.error ?? 'MCP 检测失败') }
+    finally { setTestingId(null) }
+  }
+
   const columns = [
     { title: '名称', dataIndex: 'name', key: 'name' },
     { title: '连接配置', key: 'connection', render: (_: any, s: McpServer) => <code style={{ fontSize: 12 }}>{connectionSummary(s)}</code> },
@@ -118,6 +136,7 @@ export default function McpServersPage() {
       title: '操作', key: 'actions',
       render: (_: any, s: McpServer) => (
         <Space>
+          <Button size="small" loading={testingId === s.id} onClick={() => handleTest(s)}>检测</Button>
           <Button size="small" onClick={() => openEdit(s)}>编辑</Button>
           <Popconfirm title="确认删除？" onConfirm={() => handleDelete(s.id)}>
             <Button size="small" danger>删除</Button>
@@ -136,6 +155,16 @@ export default function McpServersPage() {
         </Button>
       </div>
       <Table dataSource={servers} columns={columns} rowKey="id" loading={loading} />
+      <Modal title={probeResult ? `MCP 检测：${probeResult.serverName}` : 'MCP 检测'} open={Boolean(probeResult)} footer={null} onCancel={() => setProbeResult(null)}>
+        {probeResult && <div>
+          <p><Tag color={probeResult.ok ? 'green' : 'red'}>{probeResult.ok ? '检测成功' : '检测失败'}</Tag>传输：{probeResult.transportType}，耗时：{probeResult.totalDurationMs}ms</p>
+          <p>工具数量：{probeResult.toolCount}{probeResult.toolNames.length ? `（${probeResult.toolNames.join('、')}）` : ''}</p>
+          {probeResult.stages.map((stage) => <div key={stage.name} style={{ marginBottom: 8 }}>
+            <Tag color={stage.status === 'success' ? 'green' : stage.status === 'failed' ? 'red' : 'default'}>{stage.status}</Tag>
+            <code>{stage.name}</code> {stage.durationMs}ms {stage.error ? <span style={{ color: '#c00' }}>{stage.error}</span> : null}
+          </div>)}
+        </div>}
+      </Modal>
       <Modal
         title={editServer ? '编辑 MCP 服务器' : '添加 MCP 服务器'}
         open={modalOpen}

@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { McpServerRepository } from '../db/mcp-server-repository.js'
 import { botManager } from '../bot-manager/bot-manager.js'
 import type { McpServerConfig, McpServerTransportType } from '@wecom-platform/types'
+import { probeMcpServer } from '@wecom-platform/core'
 
 export const mcpServersRouter: Router = Router({ mergeParams: true })
 
@@ -90,7 +91,6 @@ function normalizeMcpServerPayload(payload: McpServerPayload): McpServerPayload 
       command: null,
       args: [],
       env: {},
-      headers: {},
     }
   }
 
@@ -115,6 +115,16 @@ function normalizeMcpServerPayload(payload: McpServerPayload): McpServerPayload 
 
 mcpServersRouter.get('/', async (req, res) => {
   res.json(await McpServerRepository.findAll())
+})
+
+mcpServersRouter.post('/:id/test', async (req, res) => {
+  const server = await McpServerRepository.findById(req.params.id)
+  if (!server) { res.status(404).json({ error: 'MCP server not found' }); return }
+  try {
+    res.json(await probeMcpServer(server))
+  } catch {
+    res.status(500).json({ error: 'MCP probe failed' })
+  }
 })
 
 mcpServersRouter.post('/', async (req, res) => {

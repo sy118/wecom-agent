@@ -30,6 +30,8 @@ export const settingsApi = {
 
 export const bindingsApi = {
   list: (botId: string) => api.get(`/bots/${botId}/bindings`).then((r) => r.data),
+  settings: (botId: string) => api.get(`/bots/${botId}/bindings/settings`).then((r) => r.data),
+  updateSettings: (botId: string, data: unknown) => api.put(`/bots/${botId}/bindings/settings`, data).then((r) => r.data),
   discovered: (botId: string) => api.get(`/bots/${botId}/bindings/discovered`).then((r) => r.data),
   create: (botId: string, data: unknown) => api.post(`/bots/${botId}/bindings`, data).then((r) => r.data),
   update: (botId: string, id: string, data: unknown) => api.put(`/bots/${botId}/bindings/${id}`, data).then((r) => r.data),
@@ -73,6 +75,7 @@ export const mcpServersApi = {
   create: (data: unknown) => api.post('/mcp-servers', data).then((r) => r.data),
   update: (id: string, data: unknown) => api.put(`/mcp-servers/${id}`, data).then((r) => r.data),
   delete: (id: string) => api.delete(`/mcp-servers/${id}`),
+  test: (id: string) => api.post(`/mcp-servers/${id}/test`).then((r) => r.data),
 }
 
 export const skillsApi = {

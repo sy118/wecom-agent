@@ -1,5 +1,5 @@
-export { createMcpToolClient, createMcpTools } from './mcp-client.js'
-export type { CreateMcpToolClientOptions, McpToolClient } from './mcp-client.js'
+export { createMcpToolClient, createMcpTools, probeMcpServer } from './mcp-client.js'
+export type { CreateMcpToolClientOptions, McpToolClient, McpProbeResult, McpProbeStageResult } from './mcp-client.js'
 export { AgentEngine, AgentTimeoutError, RecursionLimitError } from './agent-engine.js'
 export type { AgentEngineConfig, AgentProgressCallbacks } from './agent-engine.js'
 export { DifyClient } from './dify-client.js'

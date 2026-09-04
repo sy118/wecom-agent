@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { BindingRepository } from '../db/binding-repository.js'
 import { ContextRepository } from '../db/context-repository.js'
 import { botManager } from '../bot-manager/bot-manager.js'
+import { BotRepository } from '../db/bot-repository.js'
 import type { ChatType } from '@wecom-platform/types'
 
 export const bindingsRouter: Router = Router({ mergeParams: true })
@@ -13,6 +14,25 @@ function parseChatType(value: unknown): ChatType | null {
 bindingsRouter.get('/', async (req, res) => {
   const { botId } = req.params as { botId: string }
   res.json(await BindingRepository.findByBotId(botId))
+})
+
+bindingsRouter.get('/settings', async (req, res) => {
+  const botId = (req.params as { botId: string }).botId
+  const bot = await BotRepository.findById(botId)
+  if (!bot) { res.status(404).json({ error: 'Bot not found' }); return }
+  res.json({ allowUnboundAccess: bot.allowUnboundAccess !== false })
+})
+
+bindingsRouter.put('/settings', async (req, res) => {
+  const botId = (req.params as { botId: string }).botId
+  if (typeof req.body.allowUnboundAccess !== 'boolean') {
+    res.status(400).json({ error: 'allowUnboundAccess must be boolean' })
+    return
+  }
+  const bot = await BotRepository.update(botId, { allowUnboundAccess: req.body.allowUnboundAccess })
+  if (!bot) { res.status(404).json({ error: 'Bot not found' }); return }
+  botManager.updateAccessPolicy(botId, req.body.allowUnboundAccess)
+  res.json({ allowUnboundAccess: bot.allowUnboundAccess !== false })
 })
 
 // GET /api/bots/:botId/bindings/discovered — chats seen but not yet bound

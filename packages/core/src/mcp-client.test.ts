@@ -4,7 +4,7 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { McpServerConfig } from '@wecom-platform/types'
-import { __testConfiguredTimeout, createMcpTools, createMcpTransport } from './mcp-client.js'
+import { __testConfiguredTimeout, createMcpTools, createMcpTransport, probeMcpServer } from './mcp-client.js'
 
 function makeServer(overrides: Partial<McpServerConfig>): McpServerConfig {
   return {
@@ -37,6 +37,22 @@ test('createMcpTransport creates SSE transport for SSE servers', () => {
   const transport = createMcpTransport(makeServer({ transportType: 'sse', url: 'http://127.0.0.1:65535/sse' }))
 
   assert.ok(transport instanceof SSEClientTransport)
+})
+
+test('createMcpTransport resolves SSE headers without exposing their values', () => {
+  const previous = process.env.MCP_SSE_TOKEN
+  process.env.MCP_SSE_TOKEN = 'sse-token'
+  try {
+    const transport = createMcpTransport(makeServer({
+      transportType: 'sse',
+      headers: { Authorization: 'Bearer ${MCP_SSE_TOKEN}' },
+    }))
+    const requestInit = (transport as unknown as { _requestInit?: RequestInit })._requestInit
+    assert.equal((requestInit?.headers as Record<string, string>).Authorization, 'Bearer sse-token')
+  } finally {
+    if (previous === undefined) delete process.env.MCP_SSE_TOKEN
+    else process.env.MCP_SSE_TOKEN = previous
+  }
 })
 
 test('createMcpTransport creates Streamable HTTP transport for /mcp servers', () => {
@@ -102,4 +118,20 @@ test('createMcpTools treats streamable-http /mcp URL as non-SSE transport', asyn
   ])
 
   assert.deepEqual(tools, [])
+})
+
+test('probeMcpServer returns stage diagnostics and does not expose credentials', async () => {
+  const result = await probeMcpServer(makeServer({
+    id: 'probe-1',
+    name: 'probe-secret',
+    transportType: 'stdio',
+    url: null,
+    command: 'node',
+    env: { TOKEN: '${MISSING_PROBE_TOKEN}' },
+  }), { connectTimeoutMs: 100 })
+
+  assert.equal(result.ok, false)
+  assert.deepEqual(result.stages.map((stage) => stage.name), ['validate', 'connect', 'initialize', 'list-tools', 'close'])
+  assert.equal(result.stages.find((stage) => stage.name === 'connect')?.status, 'failed')
+  assert.equal(result.stages.some((stage) => stage.error?.includes('MISSING_PROBE_TOKEN')), true)
 })

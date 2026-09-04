@@ -19,6 +19,7 @@ function rowToConfig(row: Record<string, unknown>): BotConfig {
     difyApiKey: (row.dify_api_key as string | null) ?? null,
     difyAppId: (row.dify_app_id as string | null) ?? null,
     visionEnabled: Boolean(row.vision_enabled),
+    allowUnboundAccess: row.allow_unbound_access === undefined ? true : Boolean(row.allow_unbound_access),
     status: row.status as BotStatus,
     createdAt: row.created_at as number,
     updatedAt: row.updated_at as number,
@@ -46,8 +47,8 @@ export const BotRepository = {
     const now = Date.now()
     await db.execute({
       sql: `INSERT INTO bots (id, name, wecom_bot_id, wecom_bot_secret, wecom_ws_url, llm_api_key, llm_base_url, llm_model,
-              provider, streaming_mode, dify_base_url, dify_api_key, dify_app_id, vision_enabled, status, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'stopped', ?, ?)`,
+              provider, streaming_mode, dify_base_url, dify_api_key, dify_app_id, vision_enabled, allow_unbound_access, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'stopped', ?, ?)`,
       args: [
         id, data.name, data.wecomBotId, data.wecomBotSecret, data.wecomWsUrl,
         data.llmApiKey, data.llmBaseUrl, data.llmModel,
@@ -57,6 +58,7 @@ export const BotRepository = {
         data.difyApiKey ?? null,
         data.difyAppId ?? null,
         data.visionEnabled ? 1 : 0,
+        data.allowUnboundAccess === undefined ? 1 : (data.allowUnboundAccess ? 1 : 0),
         now, now,
       ],
     })
@@ -80,6 +82,7 @@ export const BotRepository = {
     if (data.difyApiKey !== undefined) { fields.push('dify_api_key = ?'); args.push(data.difyApiKey) }
     if (data.difyAppId !== undefined) { fields.push('dify_app_id = ?'); args.push(data.difyAppId) }
     if (data.visionEnabled !== undefined) { fields.push('vision_enabled = ?'); args.push(data.visionEnabled ? 1 : 0) }
+    if (data.allowUnboundAccess !== undefined) { fields.push('allow_unbound_access = ?'); args.push(data.allowUnboundAccess ? 1 : 0) }
     args.push(id)
     await db.execute({ sql: `UPDATE bots SET ${fields.join(', ')} WHERE id = ?`, args })
     return this.findById(id)

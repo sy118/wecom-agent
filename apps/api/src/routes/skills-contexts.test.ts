@@ -413,6 +413,33 @@ test('Binding API edits mutable fields and rejects chatKey changes', async () =>
   assert.equal((await BindingRepository.findById(bot.id, created.body.id))?.chatKey, 'wecom:group:edit-me')
 })
 
+test('Binding settings API defaults to enabled and validates policy updates', async () => {
+  const bot = await createBot('binding-settings-bot')
+  const initial = await requestJson(`/api/bots/${bot.id}/bindings/settings`)
+  assert.equal(initial.response.status, 200)
+  assert.equal(initial.body.allowUnboundAccess, true)
+
+  const invalid = await requestJson(`/api/bots/${bot.id}/bindings/settings`, {
+    method: 'PUT',
+    body: JSON.stringify({ allowUnboundAccess: 'false' }),
+  })
+  assert.equal(invalid.response.status, 400)
+
+  const disabled = await requestJson(`/api/bots/${bot.id}/bindings/settings`, {
+    method: 'PUT',
+    body: JSON.stringify({ allowUnboundAccess: false }),
+  })
+  assert.equal(disabled.response.status, 200)
+  assert.equal(disabled.body.allowUnboundAccess, false)
+  assert.equal((await BotRepository.findById(bot.id))?.allowUnboundAccess, false)
+
+  const enabled = await requestJson(`/api/bots/${bot.id}/bindings/settings`, {
+    method: 'PUT',
+    body: JSON.stringify({ allowUnboundAccess: true }),
+  })
+  assert.equal(enabled.body.allowUnboundAccess, true)
+})
+
 test('Context API accepts global skillConfigs and masks sensitive params in responses', async () => {
   const ownerBot = await createBot('context-owner')
   const otherBot = await createBot('context-other')

@@ -146,3 +146,24 @@ test('MCP server API validates and normalizes transport-specific payloads', asyn
     { key: 'project', label: '项目', type: 'string', description: '默认项目' },
   ])
 })
+
+test('MCP test endpoint probes saved configuration while server is disabled', async () => {
+  const created = await McpServerRepository.create({
+    botId: null,
+    name: 'probe-disabled-stdio',
+    url: null,
+    transportType: 'stdio',
+    enabled: false,
+    command: process.execPath,
+    args: ['-e', 'process.exit(0)'],
+    env: {},
+    headers: {},
+  })
+
+  const tested = await requestJson(`/api/mcp-servers/${created.id}/test`, { method: 'POST', body: '{}' })
+  assert.equal(tested.response.status, 200)
+  assert.equal(tested.body.serverId, created.id)
+  assert.equal(tested.body.ok, false)
+  assert.deepEqual(tested.body.stages.map((stage: { name: string }) => stage.name), ['validate', 'connect', 'initialize', 'list-tools', 'close'])
+  assert.equal((await McpServerRepository.findById(created.id))?.enabled, false)
+})

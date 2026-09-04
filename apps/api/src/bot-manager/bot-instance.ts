@@ -2,9 +2,10 @@ import { randomUUID } from 'crypto'
 import { readFile } from 'fs/promises'
 import type { Client } from '@libsql/client'
 import type { StructuredTool } from '@langchain/core/tools'
-import { AgentEngine, AsyncLimiter, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, appendSkillPrompts, buildSkillPromptAdditions, createMcpToolClient, createSkillTools, decryptWecomImage } from '@wecom-platform/core'
+import { AgentEngine, AsyncLimiter, DifyClient, MessageQueue, RecursionLimitError, WecomAdapter, buildSkillPromptAdditions, createMcpToolClient, createSkillTools, decryptWecomImage } from '@wecom-platform/core'
 import type { McpToolClient } from '@wecom-platform/core'
-import { SessionStore } from '../session-store.js'
+import { SessionRuntime } from '../session-runtime.js'
+import { assembleAgentRuntime } from './agent-runtime-factory.js'
 import { MediaDownloadService, registerWecomImageDecrypt } from '../services/media-download-service.js'
 import { DoNotDisturbService } from '../services/do-not-disturb-service.js'
 import { SkillAuditRepository } from '../db/skill-audit-repository.js'
@@ -19,6 +20,7 @@ import { createGenerationTask, formatGenerationTaskResult, formatGenerationTaskS
 import { generatedFileName } from '../services/generated-file-service.js'
 import { assertImageGenerationCapacity, ensureImageGenerationProcessorRegistered } from '../services/image-generation-service.js'
 import { generationTaskRunner } from '../services/generation-task-runner.js'
+import { ConversationResolver, type ConversationResolution } from './conversation-resolver.js'
 import { parseWecomCommand } from '../commands/wecom-command-parser.js'
 import { WecomCommandExecutor } from '../commands/wecom-command-executor.js'
 import type { WecomCommandActor, WecomCommandHandlerResult, WecomCommandRuntime } from '../commands/wecom-command-executor.js'
@@ -207,9 +209,10 @@ export interface DiscoveredChat {
   chatKey: string
   chatType: 'group' | 'user'
   firstSeenAt: number
+  accessStatus?: 'allowed' | 'needs-binding'
 }
 
-type EffectiveContextSource = 'runtime' | 'binding' | 'default'
+type EffectiveContextSource = Exclude<ConversationResolution['source'], 'none'>
 
 interface EffectiveContext {
   context: ContextConfig
@@ -238,11 +241,13 @@ export class BotInstance {
   private mcpReloadInFlight = new Map<string, Promise<StructuredTool[]>>()
   private skillToolPool = new Map<string, SkillDefinition>()
   private queues = new Map<string, MessageQueue>()
-  private sessions: SessionStore
+  private sessions: SessionRuntime
   private processedMsgs = new Set<string>()
   private contextMap: Map<string, ContextConfig>
   private bindingMap: Map<string, string>
   private defaultContext: ContextConfig | null
+  private allowUnboundAccess: boolean
+  private conversationResolver: ConversationResolver
   private discoveredChats = new Map<string, DiscoveredChat>()
   private commandExecutor: WecomCommandExecutor
   private completedTemplateCardTasks = new Set<string>()
@@ -259,10 +264,12 @@ export class BotInstance {
       wsUrl: deps.bot.wecomWsUrl,
       visionEnabled: deps.bot.visionEnabled,
     })
-    this.sessions = new SessionStore(deps.db, deps.bot.id)
+    this.sessions = new SessionRuntime(deps.db, deps.bot.id)
     this.contextMap = new Map(deps.contexts.map((c) => [c.id, c]))
     this.bindingMap = new Map(deps.bindings.map((b) => [b.chatKey, b.contextId]))
     this.defaultContext = deps.contexts.find((c) => c.isDefault) ?? null
+    this.allowUnboundAccess = deps.bot.allowUnboundAccess !== false
+    this.conversationResolver = new ConversationResolver(deps.contexts, deps.bindings, { allowUnboundAccess: this.allowUnboundAccess })
     this.skillToolPool = new Map(deps.skills.filter((skill) => skill.enabled).map((skill) => [skill.id, skill]))
     this.commandExecutor = new WecomCommandExecutor({
       handle: (command, runtime, actor) => this.handleRuntimeCommand(command, runtime, actor),
@@ -305,31 +312,33 @@ export class BotInstance {
     return chatKey.startsWith('wecom:group:')
   }
 
-  private async resolveEffectiveContext(chatKey: string, userId: string): Promise<EffectiveContext | null> {
+  private async resolveConversation(chatKey: string, userId: string): Promise<ConversationResolution> {
     const groupChat = this.isGroupChat(chatKey)
     const active = groupChat
       ? await ActiveContextRepository.findForChat(this.deps.bot.id, chatKey)
       : await ActiveContextRepository.findForUser(this.deps.bot.id, chatKey, userId)
+    let runtimeContext: ContextConfig | null = null
     if (active) {
       const activeContext = this.contextMap.get(active.contextId)
       if (activeContext && groupChat && active.scope === 'chat') {
-        return { context: activeContext, source: 'runtime' }
+        runtimeContext = activeContext
       }
-      if (activeContext && await ContextAccessRepository.hasAccess(this.deps.bot.id, userId, active.contextId)) {
-        return { context: activeContext, source: 'runtime' }
+      if (!runtimeContext && activeContext && await ContextAccessRepository.hasAccess(this.deps.bot.id, userId, active.contextId)) {
+        runtimeContext = activeContext
       }
-      if (active.scope === 'user_in_chat' && active.wecomUserId === userId) {
+      if (!runtimeContext && active.scope === 'user_in_chat' && active.wecomUserId === userId) {
         await ActiveContextRepository.clear(this.deps.bot.id, chatKey, userId)
-      } else if (active.scope === 'chat') {
+      } else if (!runtimeContext && active.scope === 'chat') {
         await ActiveContextRepository.clearChat(this.deps.bot.id, chatKey)
       }
     }
 
-    const boundContextId = this.bindingMap.get(chatKey)
-    const boundContext = boundContextId ? this.contextMap.get(boundContextId) : null
-    if (boundContext) return { context: boundContext, source: 'binding' }
-    if (this.defaultContext) return { context: this.defaultContext, source: 'default' }
-    return null
+    return this.conversationResolver.resolve(chatKey, runtimeContext)
+  }
+
+  private async resolveEffectiveContext(chatKey: string, userId: string): Promise<EffectiveContext | null> {
+    const resolved = await this.resolveConversation(chatKey, userId)
+    return resolved.context ? { context: resolved.context, source: resolved.source as EffectiveContextSource } : null
   }
 
   private async handleContextCommand(
@@ -597,6 +606,7 @@ export class BotInstance {
   private formatContextSource(source: EffectiveContextSource): string {
     if (source === 'runtime') return '运行时切换'
     if (source === 'binding') return '后台绑定'
+    if (source === 'unbound') return '免绑定放行'
     return '默认上下文'
   }
 
@@ -1097,12 +1107,14 @@ export class BotInstance {
     this.deps.contexts = contexts
     this.contextMap = new Map(contexts.map((context) => [context.id, context]))
     this.defaultContext = contexts.find((context) => context.isDefault) ?? null
+    this.conversationResolver.updateContexts(contexts)
     console.log(`[BotInstance:${this.deps.bot.id}] Reloaded ${contexts.length} context(s)`)
   }
 
   reloadBindings(bindings: Binding[]): void {
     this.deps.bindings = bindings
     this.bindingMap = new Map(bindings.map((binding) => [binding.chatKey, binding.contextId]))
+    this.conversationResolver.updateBindings(bindings)
     for (const binding of bindings) {
       this.discoveredChats.delete(binding.chatKey)
     }
@@ -1191,6 +1203,12 @@ export class BotInstance {
     if (this.deps.bot.visionEnabled) return msg.content
     // visionEnabled=false: keep only text parts, replace image items with [图片] label (no URL)
     return msg.content.map((c) => (c.type === 'text' ? c.text : '[图片]')).join('\n')
+  }
+
+  updateAccessPolicy(allowUnboundAccess: boolean): void {
+    this.allowUnboundAccess = allowUnboundAccess
+    this.deps.bot.allowUnboundAccess = allowUnboundAccess
+    this.conversationResolver.setPolicy({ allowUnboundAccess })
   }
 
   private rawTextOf(msg: IncomingMessage): string | undefined {
@@ -1364,13 +1382,19 @@ export class BotInstance {
       }
     }
 
-    const resolvedContext = await this.resolveEffectiveContext(chatKey, msg.userId)
-    const context = resolvedContext?.context ?? null
+    const resolution = await this.resolveConversation(chatKey, msg.userId)
+    const context = resolution.context
+    if (resolution.source === 'unbound' || resolution.access === 'needs-binding') {
+      const chatType = chatKey.startsWith('wecom:group:') ? 'group' : 'user'
+      const existing = this.discoveredChats.get(chatKey)
+      this.discoveredChats.set(chatKey, {
+        chatKey,
+        chatType,
+        firstSeenAt: existing?.firstSeenAt ?? Date.now(),
+        accessStatus: resolution.source === 'unbound' ? 'allowed' : 'needs-binding',
+      })
+    }
     if (!context) {
-      if (!this.discoveredChats.has(chatKey)) {
-        const chatType = chatKey.startsWith('wecom:group:') ? 'group' : 'user'
-        this.discoveredChats.set(chatKey, { chatKey, chatType, firstSeenAt: Date.now() })
-      }
       await this.adapter.sendMessage(chatId, UNBOUND_REPLY).catch(() => {})
       return
     }
@@ -1407,7 +1431,7 @@ export class BotInstance {
         if (annotation) {
           await AnnotationAnswerRepository.recordHit(annotation.id)
           const answer = safeReply(annotation.answer)
-          await this.saveMessages(chatKey, content, answer, responseRun.id)
+          await this.saveMessages(session.id, content, answer, responseRun.id)
           await BotResponseRunRepository.markSent(responseRun.id, answer)
           await this.sendTrackedStaticReply(chatId, answer, responseRun, frame)
           await this.publishStageEvent(responseRun.id, 'queued', 'end')
@@ -1422,9 +1446,9 @@ export class BotInstance {
             console.log(`[BotInstance:${this.deps.bot.id}] Dify provider skips MCP/Skill runtime tools`)
           }
           if (streamingMode === 'none') {
-            await this.handleDify(chatId, chatKey, content, session.difyConversationId ?? null, undefined, frame, responseRun)
+          await this.handleDify(chatId, chatKey, content, session.difyConversationId ?? null, undefined, frame, responseRun, session.id)
           } else {
-            await this.handleDifyStreaming(chatId, chatKey, content, session.difyConversationId ?? null, frame, responseRun)
+          await this.handleDifyStreaming(chatId, chatKey, content, session.difyConversationId ?? null, frame, responseRun, session.id)
           }
           await this.publishStageEvent(responseRun.id, 'queued', 'end')
           return
@@ -1433,17 +1457,24 @@ export class BotInstance {
         const mcpTools = this.resolveTools(context.mcpConfigs ?? [])
         const skillContext = this.createSkillRuntimeContext(context.id, chatKey, content)
         const skillTools = this.resolveSkillTools(context.skillConfigs ?? [], skillContext)
-        const tools = this.mergeTools(mcpTools, skillTools)
-        let systemPrompt = injectAllowedProjects(context.systemPrompt, context.mcpConfigs ?? [])
-        systemPrompt = appendSkillPrompts(systemPrompt, buildSkillPromptAdditions([...this.skillToolPool.values()], context.skillConfigs ?? [], content))
+        const systemPromptBase = injectAllowedProjects(context.systemPrompt, context.mcpConfigs ?? [])
+        const runtime = assembleAgentRuntime({
+          context,
+          mcpTools,
+          skillTools,
+          systemPrompt: systemPromptBase,
+          skillPrompt: buildSkillPromptAdditions([...this.skillToolPool.values()], context.skillConfigs ?? [], content),
+        })
+        const tools = runtime.tools
+        const systemPrompt = runtime.systemPrompt
         const promptWithForcedResults = await this.executeForceCallMcps(systemPrompt, context.mcpConfigs ?? [], content, responseRun.id)
 
         if (streamingMode === 'progressive') {
-          await this.handleProgressive(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
+          await this.handleProgressive(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun, session.id)
         } else if (streamingMode === 'typewriter') {
-          await this.handleTypewriter(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
+          await this.handleTypewriter(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun, session.id)
         } else {
-          await this.handleNone(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun)
+          await this.handleNone(chatId, chatKey, content, session.messages, promptWithForcedResults, tools, frame, responseRun, session.id)
         }
         await this.publishStageEvent(responseRun.id, 'queued', 'end')
         } finally {
@@ -1895,7 +1926,8 @@ export class BotInstance {
     systemPrompt: string,
     tools: StructuredTool[],
     frame: any | undefined,
-    responseRun: BotResponseRun
+    responseRun: BotResponseRun,
+    sessionId = chatKey
   ): Promise<void> {
     const reporter = this.createProgressReporter(chatId, frame, responseRun, 'none')
     await reporter.start()
@@ -1909,14 +1941,14 @@ export class BotInstance {
           if (stage === 'tool') reporter.setPhase('organizing')
         },
       }))
-      await this.saveMessages(chatKey, content, response, responseRun.id)
+      await this.saveMessages(sessionId, content, response, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, response)
       await reporter.finish(response)
     } catch (err: any) {
       reporter.stop()
       if (err instanceof RecursionLimitError) {
         const response = safeReply(err.summary)
-        await this.saveMessages(chatKey, content, response, responseRun.id)
+        await this.saveMessages(sessionId, content, response, responseRun.id)
         await BotResponseRunRepository.markSent(responseRun.id, response)
         await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
         return
@@ -1927,7 +1959,7 @@ export class BotInstance {
         console.warn(`[BotInstance:${this.deps.bot.id}] Vision error ${status}, retrying with text degradation`)
         try {
           const response = await invokeVisionFallback(this.engine!, sessionMessages, content, systemPrompt, tools)
-          await this.saveMessages(chatKey, degradeVisionContent(content), response, responseRun.id)
+          await this.saveMessages(sessionId, degradeVisionContent(content), response, responseRun.id)
           await BotResponseRunRepository.markSent(responseRun.id, response)
           await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
           return
@@ -1948,7 +1980,8 @@ export class BotInstance {
     systemPrompt: string,
     tools: StructuredTool[],
     frame: any | undefined,
-    responseRun: BotResponseRun
+    responseRun: BotResponseRun,
+    sessionId = chatKey
   ): Promise<void> {
     const reporter = this.createProgressReporter(chatId, frame, responseRun, 'progressive')
     await reporter.start()
@@ -1966,14 +1999,14 @@ export class BotInstance {
           if (stage === 'tool') reporter.setPhase('organizing')
         },
       }))
-      await this.saveMessages(chatKey, content, response, responseRun.id)
+      await this.saveMessages(sessionId, content, response, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, response)
       await reporter.finish(response)
     } catch (err: any) {
       reporter.stop()
       if (err instanceof RecursionLimitError) {
         const response = safeReply(err.summary)
-        await this.saveMessages(chatKey, content, response, responseRun.id)
+        await this.saveMessages(sessionId, content, response, responseRun.id)
         await BotResponseRunRepository.markSent(responseRun.id, response)
         await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
         return
@@ -1983,7 +2016,7 @@ export class BotInstance {
         console.warn(`[BotInstance:${this.deps.bot.id}] Vision error ${status}, retrying with text degradation`)
         try {
           const response = await invokeVisionFallback(this.engine!, sessionMessages, content, systemPrompt, tools)
-          await this.saveMessages(chatKey, degradeVisionContent(content), response, responseRun.id)
+          await this.saveMessages(sessionId, degradeVisionContent(content), response, responseRun.id)
           await BotResponseRunRepository.markSent(responseRun.id, response)
           await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
           return
@@ -2005,7 +2038,8 @@ export class BotInstance {
     systemPrompt: string,
     tools: StructuredTool[],
     frame: any | undefined,
-    responseRun: BotResponseRun
+    responseRun: BotResponseRun,
+    sessionId = chatKey
   ): Promise<void> {
     const reporter = this.createProgressReporter(chatId, frame, responseRun, 'typewriter')
     await reporter.start()
@@ -2052,14 +2086,14 @@ export class BotInstance {
         }))
       }
 
-      await this.saveMessages(chatKey, content, finalResponse, responseRun.id)
+      await this.saveMessages(sessionId, content, finalResponse, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, finalResponse)
       await reporter.finish(finalResponse)
     } catch (err: any) {
       reporter.stop()
       if (err instanceof RecursionLimitError) {
         const response = safeReply(accumulated.trim() || err.summary)
-        await this.saveMessages(chatKey, content, response, responseRun.id)
+        await this.saveMessages(sessionId, content, response, responseRun.id)
         await BotResponseRunRepository.markSent(responseRun.id, response)
         await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
         return
@@ -2069,7 +2103,7 @@ export class BotInstance {
         console.warn(`[BotInstance:${this.deps.bot.id}] Vision error ${status}, retrying with text degradation`)
         try {
           const response = await invokeVisionFallback(this.engine!, sessionMessages, content, systemPrompt, tools)
-          await this.saveMessages(chatKey, degradeVisionContent(content), response, responseRun.id)
+          await this.saveMessages(sessionId, degradeVisionContent(content), response, responseRun.id)
           await BotResponseRunRepository.markSent(responseRun.id, response)
           await this.finishTrackedReply(chatId, response, responseRun, reporter.streamId)
           return
@@ -2090,7 +2124,8 @@ export class BotInstance {
     conversationId: string | null,
     streamId: string | undefined,
     frame: any | undefined,
-    responseRun: BotResponseRun
+    responseRun: BotResponseRun,
+    sessionId = chatKey
   ): Promise<void> {
     const reporter = this.createProgressReporter(chatId, frame, responseRun, 'none')
     await reporter.start()
@@ -2101,8 +2136,8 @@ export class BotInstance {
       const result = await this.difyClient!.chat(content, conversationId, chatKey)
       const answer = safeReply(result.answer)
       await this.publishStageEvent(responseRun.id, 'dify', 'end')
-      await this.sessions.setDifyConversationId(chatKey, result.conversationId)
-      await this.saveMessages(chatKey, content, answer, responseRun.id)
+      await this.sessions.setDifyConversationId(sessionId, result.conversationId)
+      await this.saveMessages(sessionId, content, answer, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, answer, { difyConversationId: result.conversationId })
       await reporter.finish(answer)
     } catch (err) {
@@ -2118,7 +2153,8 @@ export class BotInstance {
     content: string | IncomingContent[],
     conversationId: string | null,
     frame: any | undefined,
-    responseRun: BotResponseRun
+    responseRun: BotResponseRun,
+    sessionId = chatKey
   ): Promise<void> {
     const reporter = this.createProgressReporter(chatId, frame, responseRun, 'typewriter')
     await reporter.start()
@@ -2135,8 +2171,8 @@ export class BotInstance {
         const result = await this.difyClient!.chat(content, conversationId, chatKey)
         const answer = safeReply(result.answer)
         await this.publishStageEvent(responseRun.id, 'dify', 'end')
-        await this.sessions.setDifyConversationId(chatKey, result.conversationId)
-        await this.saveMessages(chatKey, content, answer, responseRun.id)
+        await this.sessions.setDifyConversationId(sessionId, result.conversationId)
+        await this.saveMessages(sessionId, content, answer, responseRun.id)
         await BotResponseRunRepository.markSent(responseRun.id, answer, { difyConversationId: result.conversationId })
         await reporter.finish(answer)
         return
@@ -2159,8 +2195,8 @@ export class BotInstance {
       })
       const answer = safeReply(result.answer)
       await this.publishStageEvent(responseRun.id, 'dify', 'end')
-      await this.sessions.setDifyConversationId(chatKey, result.conversationId)
-      await this.saveMessages(chatKey, content, answer, responseRun.id)
+      await this.sessions.setDifyConversationId(sessionId, result.conversationId)
+      await this.saveMessages(sessionId, content, answer, responseRun.id)
       await BotResponseRunRepository.markSent(responseRun.id, answer, { difyConversationId: result.conversationId })
       await reporter.finish(answer)
     } catch (err) {
@@ -2175,10 +2211,10 @@ export class BotInstance {
     }
   }
 
-  private async saveMessages(chatKey: string, content: string | IncomingContent[], response: string, responseRunId?: string | null): Promise<void> {
+  private async saveMessages(sessionId: string, content: string | IncomingContent[], response: string, responseRunId?: string | null): Promise<void> {
     const contentStr = typeof content === 'string' ? content : JSON.stringify(content)
-    await this.sessions.addMessage(chatKey, { role: 'human', content: contentStr, timestamp: Date.now(), responseRunId }, responseRunId)
-    await this.sessions.addMessage(chatKey, { role: 'ai', content: response, timestamp: Date.now(), responseRunId }, responseRunId)
+    await this.sessions.addMessage(sessionId, { role: 'human', content: contentStr, timestamp: Date.now(), responseRunId }, responseRunId)
+    await this.sessions.addMessage(sessionId, { role: 'ai', content: response, timestamp: Date.now(), responseRunId }, responseRunId)
   }
 
   private getOrCreateQueue(chatKey: string): MessageQueue {

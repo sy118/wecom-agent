@@ -28,16 +28,22 @@ export default function TemplateMarketPage() {
   const [detail, setDetail] = useState<Template & { revisions?: TemplateRevision[] } | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
 
-  const load = async () => {
+  const load = async (refreshCategories = false) => {
     setLoading(true)
     try {
       const list = await templatesApi.list({ search: search || undefined, category })
       setTemplates(list)
-      setCategories(Array.from(new Set(list.map((t: Template) => t.category))))
+      // 保留完整分类列表；筛选某一分类后不能让其它分类选项消失。
+      if (refreshCategories || categories.length === 0) {
+        const categorySource = refreshCategories && (search || category)
+          ? await templatesApi.list()
+          : list
+        setCategories(Array.from(new Set(categorySource.map((t: Template) => t.category))))
+      }
     } finally { setLoading(false) }
   }
 
-  useEffect(() => { load() }, [category])
+  useEffect(() => { load(true) }, [category])
 
   const openDetail = async (template: Template) => {
     const detailData = await templatesApi.get(template.id)
@@ -96,7 +102,7 @@ export default function TemplateMarketPage() {
           prefix={<SearchOutlined />}
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          onPressEnter={load}
+          onPressEnter={() => load()}
           allowClear
           style={{ width: 220 }}
         />
@@ -108,7 +114,7 @@ export default function TemplateMarketPage() {
           onChange={setCategory}
           options={categories.map((c) => ({ label: c, value: c }))}
         />
-        <Button type="primary" onClick={load}>搜索</Button>
+        <Button type="primary" onClick={() => load()}>搜索</Button>
         <Upload accept=".json" showUploadList={false} beforeUpload={(file) => handleImport(file as File)}>
           <Button icon={<UploadOutlined />}>导入模板</Button>
         </Upload>

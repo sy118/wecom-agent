@@ -1,12 +1,12 @@
 import { useEffect, useState } from 'react'
-import { Table, Button, Space, Modal, Form, Input, Select, message, Popconfirm, Card, Tag, Tooltip } from 'antd'
+import { Table, Button, Space, Modal, Form, Input, Select, message, Popconfirm, Card, Tag, Tooltip, Switch, Alert } from 'antd'
 import { PlusOutlined, ArrowLeftOutlined, ReloadOutlined, QuestionCircleOutlined } from '@ant-design/icons'
 import { useParams, useNavigate } from 'react-router-dom'
 import { bindingsApi, contextsApi } from '../api/index.js'
 
 interface Binding { id: string; chatKey: string; chatName: string | null; chatType: string; contextId: string }
-interface Context { id: string; name: string }
-interface DiscoveredChat { chatKey: string; chatType: 'group' | 'user'; firstSeenAt: number }
+interface Context { id: string; name: string; isDefault?: boolean }
+interface DiscoveredChat { chatKey: string; chatType: 'group' | 'user'; firstSeenAt: number; accessStatus?: 'allowed' | 'needs-binding' }
 
 export default function BindingsPage() {
   const { botId } = useParams<{ botId: string }>()
@@ -14,6 +14,8 @@ export default function BindingsPage() {
   const [bindings, setBindings] = useState<Binding[]>([])
   const [contexts, setContexts] = useState<Context[]>([])
   const [discovered, setDiscovered] = useState<DiscoveredChat[]>([])
+  const [allowUnboundAccess, setAllowUnboundAccess] = useState(true)
+  const [policySaving, setPolicySaving] = useState(false)
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editingBinding, setEditingBinding] = useState<Binding | null>(null)
@@ -22,16 +24,29 @@ export default function BindingsPage() {
   const load = async () => {
     setLoading(true)
     try {
-      const [b, c, d] = await Promise.all([
+      const [b, c, d, settings] = await Promise.all([
         bindingsApi.list(botId!),
         contextsApi.list(botId!),
         bindingsApi.discovered(botId!),
+        bindingsApi.settings(botId!),
       ])
-      setBindings(b); setContexts(c); setDiscovered(d)
+      setBindings(b); setContexts(c); setDiscovered(d); setAllowUnboundAccess(settings.allowUnboundAccess !== false)
     } finally { setLoading(false) }
   }
 
   useEffect(() => { load() }, [botId])
+
+  const handlePolicyChange = async (checked: boolean) => {
+    setPolicySaving(true)
+    try {
+      const settings = await bindingsApi.updateSettings(botId!, { allowUnboundAccess: checked })
+      setAllowUnboundAccess(settings.allowUnboundAccess !== false)
+      message.success('未绑定访问策略已更新')
+      await load()
+    } catch (err: any) {
+      message.error(err?.response?.data?.error ?? '更新访问策略失败')
+    } finally { setPolicySaving(false) }
+  }
 
   const handleSave = async (values: any) => {
     try {
@@ -103,6 +118,10 @@ export default function BindingsPage() {
       render: (v: string) => <Tag color={v === 'group' ? 'blue' : 'purple'}>{v === 'group' ? '群聊' : '私聊'}</Tag>
     },
     {
+      title: '访问状态', dataIndex: 'accessStatus', key: 'accessStatus',
+      render: (v: string) => <Tag color={v === 'allowed' ? 'green' : 'orange'}>{v === 'allowed' ? '已放行' : '需要绑定'}</Tag>
+    },
+    {
       title: '首次发现', dataIndex: 'firstSeenAt', key: 'firstSeenAt',
       render: (t: number) => new Date(t).toLocaleString()
     },
@@ -130,6 +149,19 @@ export default function BindingsPage() {
           </Button>
         </Space>
       </div>
+
+      <Card title="未绑定会话访问" size="small" style={{ marginBottom: 16 }}>
+        <Space align="start">
+          <Switch checked={allowUnboundAccess} loading={policySaving} onChange={handlePolicyChange} />
+          <div>
+            <div>{allowUnboundAccess ? '允许所有未绑定私聊和群聊访问' : '未绑定会话必须先绑定上下文'}</div>
+            <div style={{ color: '#888', fontSize: 12 }}>允许访问时使用机器人的默认上下文；静态绑定和运行时上下文优先。</div>
+          </div>
+        </Space>
+        {!contexts.some((context) => (context as any).isDefault) && allowUnboundAccess && (
+          <Alert type="warning" showIcon message="当前没有默认上下文，未绑定会话仍无法访问。" style={{ marginTop: 12 }} />
+        )}
+      </Card>
 
       {/* Discovered chats — waiting to be bound */}
       {discovered.length > 0 && (
