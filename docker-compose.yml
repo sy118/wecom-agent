@@ -5,7 +5,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        NODE_IMAGE: ${NODE_IMAGE:-ca7kangnvcl9wf.xuanyuan.run/library/node:20-alpine}
+        NODE_IMAGE: ${NODE_IMAGE:-refujmaui99ffeuuaf.xuanyuan.run/library/node:20-alpine}
     restart: always
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -41,7 +41,7 @@ services:
       context: .
       dockerfile: docker/oceanbase-mcp/Dockerfile
       args:
-        PYTHON_IMAGE: ${OCEANBASE_MCP_PYTHON_IMAGE:-ca7kangnvcl9wf.xuanyuan.run/library/python:3.11-slim}
+        PYTHON_IMAGE: ${OCEANBASE_MCP_PYTHON_IMAGE:-refujmaui99ffeuuaf.xuanyuan.run/library/python:3.11-slim}
     restart: always
     environment:
       OB_HOST: ${OB_HOST}

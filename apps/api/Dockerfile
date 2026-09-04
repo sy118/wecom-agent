@@ -1,4 +1,4 @@
-ARG NODE_IMAGE=ca7kangnvcl9wf.xuanyuan.run/library/node:20-alpine
+ARG NODE_IMAGE=refujmaui99ffeuuaf.xuanyuan.run/library/node:20-alpine
 
 FROM ${NODE_IMAGE} AS builder
 WORKDIR /app

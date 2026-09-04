@@ -1,4 +1,4 @@
-ARG PYTHON_IMAGE=ca7kangnvcl9wf.xuanyuan.run/library/python:3.11-slim
+ARG PYTHON_IMAGE=refujmaui99ffeuuaf.xuanyuan.run/library/python:3.11-slim
 
 FROM ${PYTHON_IMAGE}
 

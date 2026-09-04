@@ -195,7 +195,7 @@ docker compose logs -f oceanbase-mcp app
 | `WEB_PORT` | Web 控制台端口 | `5173` |
 | `WEB_HOST` | Web 本地开发监听地址 | `127.0.0.1` |
 | `SKILL_SCRIPTS_ENABLED` | 是否允许执行脚本型 Skill | `false` |
-| `NODE_IMAGE` | Docker 构建使用的 Node 基础镜像 | `ca7kangnvcl9wf.xuanyuan.run/library/node:20-alpine` |
+| `NODE_IMAGE` | Docker 构建使用的 Node 基础镜像 | `refujmaui99ffeuuaf.xuanyuan.run/library/node:20-alpine` |
 | `DOCKER_IMAGE` | 应用镜像仓库地址 | `registry.cn-hangzhou.aliyuncs.com/serein_ai/wecom-agent` |
 | `DOCKER_TAG` | 应用镜像版本号 | `latest` |
 | `BOT_AUTO_START_CONCURRENCY` | 服务启动时自动启动 Bot 的并发上限 | `3` |
